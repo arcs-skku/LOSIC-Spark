@@ -9,15 +9,6 @@ The implementation is based on **Apache Spark 2.4.7**.
 ---
 
 # Repository Structure
-LOSIC/
-├── patch/
-│ └── losic-spark-2.4.7.patch
-├── conf/
-│ └── spark-defaults.conf
-├── scripts/
-│ └── (example scripts)
-└── README.md
-
 
 - `patch/` : LOSIC modifications to the Spark engine  
 - `conf/` : Spark configuration enabling LOSIC  
