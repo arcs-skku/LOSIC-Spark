@@ -74,6 +74,25 @@ cp /path/to/LOSIC/conf/spark-defaults.conf conf/
 Alternatively, append the LOSIC-related parameters to your existing
 `spark-defaults.conf`.
 
+### Additional Spark Configuration
+
+In addition to enabling LOSIC through `spark-defaults.conf`, the standard Spark cluster configuration is also required.
+
+This includes configuring:
+
+- `conf/master`
+- `conf/slaves` (or `conf/workers` depending on the Spark distribution)
+- Hadoop / HDFS paths if HDFS is used for storage
+- Environment settings in `conf/spark-env.sh`
+
+These configurations are identical to those required when setting up a **standard Apache Spark standalone cluster**.
+
+Please refer to the official Spark documentation for detailed instructions on configuring a standalone cluster:
+
+https://spark.apache.org/docs/2.4.7/spark-standalone.html
+
+The LOSIC artifact does not modify the standard cluster setup procedure.
+
 <br>
 
 # Running LOSIC
