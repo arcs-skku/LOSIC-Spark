@@ -24,7 +24,7 @@ LOSIC/
 - `conf/` : Spark configuration enabling LOSIC  
 - `scripts/` : example scripts for running experiments  
 
-
+<br>
 
 # System Requirements
 
