@@ -87,3 +87,46 @@ bin/spark-submit
 --master <spark-master>
 <application-jar>
 ```
+
+<br>
+
+# LOSIC Configuration Parameters
+
+LOSIC provides several configuration parameters to control profiling, caching optimization, and debugging behaviors.  
+The following parameters can be specified in `spark-defaults.conf`.
+
+## Essential Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `spark.ss.profile.enabled` | `false` | Enables runtime profiling. In typical LOSIC usage this should be set to `true`. It can be disabled to avoid initial profiling overhead for workloads with little or no reuse. |
+| `spark.ss.profile.max` | `1000` | Maximum number of profiling samples per operator. Empirically, `1000` provides a good balance between accuracy and overhead. |
+| `spark.ss.profile.threshold` | `0.99` | Threshold used by the profiling planner to tolerate estimation errors when deciding whether to profile the next operation. In practice, values around `0.95–0.99` work well. |
+| `spark.ss.optimize.enabled` | `false` | Enables LOSIC cache optimization. When enabled, LOSIC determines cache placement based on collected profiling data. If insufficient profiling data exists, the optimization module may be skipped. |
+| `spark.ss.unpersist.enabled` | `false` | Enables proactive unpersist operations triggered by LOSIC’s cache decisions when memory pressure occurs. Typically left `false`, but it may be automatically enabled when optimization is active and memory becomes constrained. |
+
+## Experimental or Debugging Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `spark.ss.optimize.mode` | `overlap` | Determines when cache optimization is performed. `overlap` runs optimization concurrently with stage execution, while `ahead` performs optimization before stage execution begins. `overlap` is recommended to minimize overhead. |
+| `spark.ss.mature.enabled` | `false` | Precomputes caching benefits for all candidates at application startup instead of computing them per stage. This introduces large startup overhead and is mainly intended for experimentation. |
+| `spark.ss.cache.plan` | `refreshing` | Strategy for updating cache decisions. `refreshing` recomputes decisions each stage, `enhancing` incrementally adds new candidates, and `pruning` initially considers all candidates and removes low-benefit ones. `refreshing` generally provides the best balance between performance and memory pressure. |
+| `spark.ss.unpersist.forceDisabled` | `false` | Forces unpersist operations to remain disabled even when memory pressure occurs. |
+| `spark.ss.memCheck.enabled` | `false` | Enables memory capacity checks at each stage. Useful for debugging memory behavior. |
+| `spark.ss.countFunctional.enabled` | `false` | Counts functional operators in each stage. Intended for internal analysis and debugging. |
+| `spark.ss.log.enabled` | `false` | Enables detailed debugging logs for LOSIC internal components. |
+| `spark.ss.noCache.enabled` | `false` | Disables all caching operations. Useful for baseline comparisons. |
+| `spark.ss.prepare.enabled` | `false` | Enables collection of RDD size information for analysis and debugging. |
+
+### Example Configuration
+
+Example configuration enabling LOSIC:
+
+```bash
+spark.ss.profile.enabled        true
+spark.ss.profile.max            1000
+spark.ss.profile.threshold      0.95
+spark.ss.optimize.enabled		    true
+spark.ss.unpersist.enabled		  false
+```
