@@ -127,6 +127,6 @@ Example configuration enabling LOSIC:
 spark.ss.profile.enabled        true
 spark.ss.profile.max            1000
 spark.ss.profile.threshold      0.95
-spark.ss.optimize.enabled		    true
-spark.ss.unpersist.enabled		  false
+spark.ss.optimize.enabled       true
+spark.ss.unpersist.enabled      false
 ```
