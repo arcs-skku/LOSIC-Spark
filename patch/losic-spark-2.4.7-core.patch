@@ -1,0 +1,3988 @@
+diff --git a/core/src/main/scala/org/apache/spark/InternalAccumulator.scala b/core/src/main/scala/org/apache/spark/InternalAccumulator.scala
+index 18b10d2..34c3ee2 100644
+--- a/core/src/main/scala/org/apache/spark/InternalAccumulator.scala
++++ b/core/src/main/scala/org/apache/spark/InternalAccumulator.scala
+@@ -41,6 +41,12 @@ private[spark] object InternalAccumulator {
+   val DISK_BYTES_SPILLED = METRICS_PREFIX + "diskBytesSpilled"
+   val PEAK_EXECUTION_MEMORY = METRICS_PREFIX + "peakExecutionMemory"
+   val UPDATED_BLOCK_STATUSES = METRICS_PREFIX + "updatedBlockStatuses"
++  val BLOCK_TIME = METRICS_PREFIX + "updatedBlockTime"    //SSPARK
++  val BLOCK_SIZE = METRICS_PREFIX + "updatedBlockSize"    //SSPARK
++<<<<<<< HEAD
++=======
++  val COMPUTED_RDDS = METRICS_PREFIX + "computedRdds"    //SSPARK
++>>>>>>> LOSIC
+   val TEST_ACCUM = METRICS_PREFIX + "testAccumulator"
+ 
+   // scalastyle:off
+diff --git a/core/src/main/scala/org/apache/spark/SparkContext.scala b/core/src/main/scala/org/apache/spark/SparkContext.scala
+index e5b1e0e..744f9c7 100644
+--- a/core/src/main/scala/org/apache/spark/SparkContext.scala
++++ b/core/src/main/scala/org/apache/spark/SparkContext.scala
+@@ -17,12 +17,16 @@
+ 
+ package org.apache.spark
+ 
++import java.nio.file.{Files, Paths} //SSPARK
+ import java.io._
+ import java.net.URI
+ import java.util.{Arrays, Locale, Properties, ServiceLoader, UUID}
+ import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
+ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
+ 
++import scala.io.Source //SSPARK
++import scala.util.control.Breaks.{break, breakable} //SSPARK
++import scala.collection.mutable.{LinkedHashMap, LinkedHashSet, HashSet} //SSPARK
+ import scala.collection.JavaConverters._
+ import scala.collection.Map
+ import scala.collection.generic.Growable
+@@ -219,6 +223,21 @@ class SparkContext(config: SparkConf) extends Logging {
+    | context.                                                                              |
+    * ------------------------------------------------------------------------------------- */
+ 
++  // SSPARK profiling dir
++  val profilingPath = Paths.get(sys.env("SPARK_HOME") + "/profiling")
++  if (!Files.exists(profilingPath)){
++    logInfoSSP("Doesn't exist profilng dir, make dir")
++    Files.createDirectory(profilingPath)
++  }
++  val profilingDir: String = profilingPath.toString
++  
++  val rdgPath = Paths.get(sys.env("SPARK_HOME") + "/rdg")
++  if (!Files.exists(rdgPath)){
++    logInfoSSP("Doesn't exist RDG dir, make dir")
++    Files.createDirectory(rdgPath)
++  }
++  val rdgDir: String = rdgPath.toString
++  
+   private[spark] def conf: SparkConf = _conf
+ 
+   /**
+@@ -360,6 +379,202 @@ class SparkContext(config: SparkConf) extends Logging {
+     Utils.setLogLevel(org.apache.log4j.Level.toLevel(upperCased))
+   }
+ 
++<<<<<<< HEAD
++  def makePreCandidates(rdg: HashMap[Int, LineageInfo]): HashMap[Int, LineageInfo] = {
++    rdg.filter(x => x._2.count > 1) //.filterNot(x => x._1 == 0)  // RDD0 and RDD1 are not always same
++  }
++  
++  /*
++  @volatile private var readRDGAlready = false
++  private[spark] var readedRDG = HashMap[Int, LineageInfo]()
++  private[spark] var preCandidates = HashMap[Int, LineageInfo]()
++
++  // Really need this as a thread?, we need to run this only 1 time at the start
++  def createPreCandidatesThread(): Thread = {
++    new Thread(new Runnable {
++      override def run(): Unit = {
++        logInfoSSP("PreCandidates Thread start", isSSparkLogEnabled)
++        readedRDG = readRDG(newAppName)
++        readRDGAlready = true
++        preCandidates = makePreCandidates(readedRDG)
++        logInfoSSP(s"readRDG ${readedRDG}", isSSparkLogEnabled)
++        logInfoSSP(s"preCandidates ${preCandidates}", isSSparkLogEnabled)
++        logInfoSSP("PreCandidates Thread stop", isSSparkLogEnabled)
++      }
++    })
++  }*/
++
++  private[spark] val newAppName = creationSite.shortForm.split(" at ")(1).split('.')(0)
++  private[spark] val readedRDG: HashMap[Int, LineageInfo] = readRDG()
++  private[spark] val preCandidates: HashMap[Int, LineageInfo] = makePreCandidates(readedRDG)
++  /*private[spark] var cacheCandidates: HashSet[String] = preCandidates
++                                                        .map(x => s"${x._2.name}(${x._2.callSite})")
++                                                        .toSet.to[HashSet]*/
++  private[spark] val cacheCandidates = LinkedHashSet[CandidatesInfo]()
++  /*
++  preCandidates.foreach{x =>
++    cacheCandidates.add(new CandidatesInfo(s"${x._2.name}(${x._2.callSite})"))
++    cacheCandidates.last.counts = x._2.count
++    cacheCandidates.last.addParents(preCandidates.filter(y => y._2.deps.contains(x._1))
++      .map(x => s"${x._2.name}(${x._2.callSite})")
++      .toSet
++      .to[HashSet])
++  }*/
++  
++  preCandidates.foreach {x =>
++    val opId = s"${x._2.name}(${x._2.callSite})"
++    val parents = preCandidates.filter(y => y._2.deps.contains(x._1))
++=======
++  val mutableConf = HashMap[String, Boolean]()
++  
++  def setOptimizeEnabled(value: Boolean): Unit = {
++    mutableConf.put("optimize", value)
++  }
++  
++  def setUnpersistPlan(value: Boolean): Unit = {
++    mutableConf.put("unpersist", value)
++  }
++
++  def getMutableConf(key: String): Boolean = {
++    mutableConf.get(key) match {
++      case Some(x) => x
++      case _ => false
++    }
++  }
++
++  private[spark] val isSSparkPrepareEnabled  = config.getBoolean("spark.ss.prepare.enabled", false)
++  private[spark] val isSSparkProfileEnabled  = config.getBoolean("spark.ss.profile.enabled", false)
++  private[spark] val maxProfile              = config.getInt    ("spark.ss.profile.max", 1000)
++  /*private[spark] val sizeProfileMode         = conf.getOption("spark.ss.profile.mode")
++                                                   .getOrElse("toArray")  */
++  //Optimize flag is can be changed at runtime
++  private[spark] var isSSparkOptimizeEnabled = config.getBoolean("spark.ss.optimize.enabled", false)
++  private[spark] val optimizeMode: String    = config.getOption ("spark.ss.optimize.mode").getOrElse("overlap")
++  // optimizeMode: "overlap" or "ahead"
++  private[spark] val isMature                = config.getBoolean("spark.ss.mature.enabled", false)
++
++  private[spark] val cachePlan: String       = config.getOption ("spark.ss.cache.plan").getOrElse("refreshing")
++  // cachePlan: "refreshing" or "enhancing" or "pruning"
++  private[spark] var unpersistPlan           = config.getBoolean("spark.ss.unpersist.enabled", false)
++  // unpersistPlan: "true" is on, "false" is off
++	private[spark] val unpersistForceDisabled  = config.getBoolean("spark.ss.unpersist.forceDisabled", false)
++  
++  private[spark] val isSSparkMemCheck        = config.getBoolean("spark.ss.memCheck.enabled", false)
++  private[spark] val isSSparkCountFunctional = config.getBoolean("spark.ss.countFunctional.enabled", false)
++  private[spark] val isSSparkLogEnabled      = config.getBoolean("spark.ss.log.enabled", false)
++  private[spark] val noCache                 = config.getBoolean("spark.ss.noCache.enabled", false) // experimental configuration
++  
++  private[spark] val profileThreshold        = config.getDouble("spark.ss.profile.threshold", 0.99)
++  
++  if (isSSparkOptimizeEnabled) setOptimizeEnabled(isSSparkOptimizeEnabled)
++  if (unpersistPlan)           setUnpersistPlan(unpersistPlan)
++
++  if ( noCache ) {
++    isSSparkOptimizeEnabled = false
++    setOptimizeEnabled(isSSparkOptimizeEnabled)
++    unpersistPlan = false
++    setUnpersistPlan(unpersistPlan)
++  }
++
++  def makePreCandidates(rdg: HashMap[Int, LineageInfo]): HashMap[Int, LineageInfo] = {
++    rdg.filter(x => x._2.count > 1) //.filterNot(x => x._1 == 0)  // RDD0 and RDD1 are not always same
++  }
++  
++  private[spark] val newAppName = creationSite.shortForm.split(" at ")(1).split('.')(0)
++  private[spark] val readedRDG: HashMap[Int, LineageInfo] = readRDG()
++  private[spark] val preCandidates: HashMap[Int, LineageInfo] = makePreCandidates(readedRDG)
++  private[spark] val cacheCandidates = LinkedHashSet[CandidatesInfo]()
++    
++  preCandidates.foreach {x =>
++    val opId = s"${x._2.name}(${x._2.callSite})"
++    //val parents = preCandidates.filter(y => y._2.deps.contains(x._1))
++    val parents = readedRDG.filter(y => y._2.deps.contains(x._1))
++>>>>>>> LOSIC
++      .map(x => s"${x._2.name}(${x._2.callSite})")
++      .toSet
++      .to[HashSet]
++    if (!(parents.size == 1 && parents.last == opId)) {
++      cacheCandidates.add(new CandidatesInfo(opId))
++      cacheCandidates.last.counts = x._2.count
++      cacheCandidates.last.addParents(parents)
++    }
++  }
++  
++<<<<<<< HEAD
++  /*
++  if (preCandidates.size != cacheCandidates.size) { // should be same? 
++                                                    // No, because the RDD which has same OP as a parent will be eliminated
++    logErrorSSP(s"Different size between preCandidates and cacheCandidates, need to check " +
++      s"preCandidates: ${preCandidates.size} elements => $preCandidates" +
++      s"cacheCandidates ${cacheCandidates.size} elements => $cacheCandidates")
++  }*/
++=======
++  //private[spark] val originalCacheList = HashSet[Int]()
++  //private[spark] val optimizeCacheList = HashSet[Int]()
++>>>>>>> LOSIC
++
++  private[spark] var cacheList = HashSet[String]()
++  /*  cacheList example, Candidate should be name & callSite + column index not rddId
++      cacheList elements will be cached.
++      (Ex 1)
++      HashSet[String]("objectFile(SVMWithSGDExample.scala:72:0)", 
++                      "map(GeneralizedLinearAlgorithm.scala:297:0)", 
++                      "randomSplit(SVMWithSGDExample.scala:75:1)") 
++      (Ex 2)
++      HashSet[String]("map(BinaryClassificationMetrics.scala:226:0)",
++                      "map(SVMWithSGDExample.scala:86:1)", 
++                      "objectFile(SVMWithSGDExample.scala:72:0)", 
++                      "UnionRDD(BinaryClassificationMetrics.scala:90:0)", 
++                      "mapPartitionsWithIndex(BinaryClassificationMetrics.scala:200:0)", 
++                      "map(GeneralizedLinearAlgorithm.scala:297:0)", 
++                      "map(SVMWithSGDExample.scala:86:0)", 
++                      "combineByKey(BinaryClassificationMetrics.scala:151:0)", 
++                      "map(BinaryClassificationMetrics.scala:209:0)", 
++                      "randomSplit(SVMWithSGDExample.scala:75:1)", 
++                      "sortByKey(BinaryClassificationMetrics.scala:155:0)", 
++                      "randomSplit(SVMWithSGDExample.scala:75:0)")
++  */
++
++<<<<<<< HEAD
++=======
++  if ( cachePlan == "pruning" || cachePlan == "refreshing" ) {  // "refreshing" mode is experimental
++    cacheList = cacheCandidates.map(_.opId).toSet.to[HashSet]
++  }
++
++>>>>>>> LOSIC
++  def createSelectCandidatesThread(stageId: Int, rdd: RDD[_], stageInputBytes: Long): Thread = {
++    new Thread(new Runnable {
++      override def run(): Unit = {
++        logInfoSSP("selectCandidates Thread start", isSSparkLogEnabled)
++<<<<<<< HEAD
++        /*if (!readRDGAlready) {
++          readedRDG = readRDG(newAppName)
++          readRDGAlready = true
++          preCandidates = makePreCandidates(readedRDG)
++          logInfoSSP(s"readRDG ${readedRDG}", isSSparkLogEnabled)
++          logInfoSSP(s"preCandidates ${preCandidates}", isSSparkLogEnabled)
++        }*/ //move to createPreCandidatesThread
++        selectCandidates(stageId, stageInputBytes)
++=======
++        if (isMature) {
++          if (stageId == 0)
++            selectCandidates(stageInputBytes)
++          selectCandidates(stageId)
++        }
++        else {
++          selectCandidates(stageId, stageInputBytes)
++        }
++>>>>>>> LOSIC
++        checkOptimizeCache(rdd)
++        logInfoSSP("selectCandidates Thread stop", isSSparkLogEnabled)
++      }
++    })
++  }
++
++<<<<<<< HEAD
++=======
++
++>>>>>>> LOSIC
+   try {
+     _conf = config.clone()
+     _conf.validateSettings()
+@@ -1034,6 +1249,9 @@ class SparkContext(config: SparkConf) extends Logging {
+     // A Hadoop configuration can be about 10 KB, which is pretty big, so broadcast it.
+     val confBroadcast = broadcast(new SerializableConfiguration(hadoopConfiguration))
+     val setInputPathsFunc = (jobConf: JobConf) => FileInputFormat.setInputPaths(jobConf, path)
++
++    inputBytes = hadoopFileSize(path)
++
+     new HadoopRDD(
+       this,
+       confBroadcast,
+@@ -1044,6 +1262,54 @@ class SparkContext(config: SparkConf) extends Logging {
+       minPartitions).setName(path)
+   }
+ 
++  var inputBytes = 0L
++  var shuffleBytes = 0L
++  // SSPARK: get HDFS file size
++  def hadoopFileSize(path: String): Long = {
++    val filePath = new Path(path)
++    val fs = filePath.getFileSystem(hadoopConfiguration)
++
++    var totalSize = 0L
++    
++    def calculateTotalSize(path: Path): Long = {
++      val status = fs.getFileStatus(path)
++      if (status.isFile) {
++        status.getLen
++      } else {
++        fs.listStatus(path).map { fileStatus =>
++          calculateTotalSize(fileStatus.getPath)
++        }.sum
++      }
++    }
++
++    try {
++      if (fs.exists(filePath)) {
++        totalSize = calculateTotalSize(filePath)
++        logInfoSSP(s"Total size of all files in $path: $totalSize bytes", isSSparkLogEnabled)
++      } else {
++        logErrorSSP(s"Path $path does not exist.")
++      }
++    } catch {
++      case e: Exception =>
++        logErrorSSP(s"Error retrieving file size for $path: ${e.getMessage}")
++    }
++    totalSize
++  }
++
++  def getStageInputBytes(lineage: LinkedHashMap[Int, LineageInfo],
++                                 rootLineage: Int): (Long, String) = {
++    if (lineage.get(rootLineage).get.deps.contains(-2)) 
++      (inputBytes, "HadoopRDD")
++    else if (lineage.get(rootLineage).get.deps.contains(-1))
++      (shuffleBytes, "ShuffleRDD")
++    else if (lineage.get(rootLineage).get.deps.contains(-3)) 
++      (0L, "ParallelCollectionRDD")
++    else {
++      logErrorSSP(s"Cannot find stage input size ${lineage.get(rootLineage)}")
++      (0L, "ERROR")
++    }
++  }
++
+   /**
+    * Smarter version of hadoopFile() that uses class tags to figure out the classes of keys,
+    * values and the InputFormat so that users don't need to pass them directly. Instead, callers
+@@ -1114,6 +1380,12 @@ class SparkContext(config: SparkConf) extends Logging {
+   def newAPIHadoopFile[K, V, F <: NewInputFormat[K, V]]
+       (path: String)
+       (implicit km: ClassTag[K], vm: ClassTag[V], fm: ClassTag[F]): RDD[(K, V)] = withScope {
++<<<<<<< HEAD
++=======
++      
++    inputBytes = hadoopFileSize(path)
++
++>>>>>>> LOSIC
+     newAPIHadoopFile(
+       path,
+       fm.runtimeClass.asInstanceOf[Class[F]],
+@@ -1914,6 +2186,14 @@ class SparkContext(config: SparkConf) extends Logging {
+    * Shut down the SparkContext.
+    */
+   def stop(): Unit = {
++<<<<<<< HEAD
++=======
++    // These logs are set to WARN due to the ALS log level.
++    if (isSSparkMemCheck) {
++      logWarningSSP(s"remainingMem ${getRemainingStorageMem()}, minMem $minRemainingStorageMem")
++    }
++
++>>>>>>> LOSIC
+     if (LiveListenerBus.withinListenerThread.value) {
+       throw new SparkException(s"Cannot stop SparkContext within listener bus thread.")
+     }
+@@ -1978,12 +2258,43 @@ class SparkContext(config: SparkConf) extends Logging {
+     if (_statusStore != null) {
+       _statusStore.close()
+     }
++<<<<<<< HEAD
++    if (isSSparkProfileEnabled){
++      val rdg = makeRDG(lineages)
++      writeRDG(rdg)
++=======
++        
++    if (isSSparkProfileEnabled){
++      val profiledRatio = (computedCount - profiledCount).toDouble / computedCount
++      // change log level to Warn because of ALS.
++      logWarningSSP(s"Skip Profiling Ratio = $profiledRatio, " +
++          s"$profiledCount rdds have been profiled of $computedCount computed rdds")
++      if (isSSparkCountFunctional) {
++        val functionalRatio = countFunctional.toDouble / computedCount
++        logWarningSSP(s"Functional Ratio = $functionalRatio, " +
++          s"$countFunctional functional rdds have been computed of $computedCount computed rdds")
++      }
++      val rdg = makeRDG(lineages)
++      writeRDG(rdg)
++      profilingTrim(profilingDir)
++>>>>>>> LOSIC
++    }
+     // Clear this `InheritableThreadLocal`, or it will still be inherited in child threads even this
+     // `SparkContext` is stopped.
+     localProperties.remove()
+     // Unset YARN mode system env variable, to allow switching between cluster types.
+     SparkContext.clearActiveContext()
+     logInfo("Successfully stopped SparkContext")
++<<<<<<< HEAD
++    profilingTrim(profilingDir)
++=======
++    if (isSSparkPrepareEnabled) {
++      //logInfoSSP(s"${rddSize}")
++      logWarningSSP(s"Total RDD size = ${rddSize.values.sum}")
++      logWarningSSP(s"Total reuse-RDD size = ${reuseRddSize.values.sum}")
++    }
++
++>>>>>>> LOSIC
+   }
+ 
+ 
+@@ -2034,6 +2345,1861 @@ class SparkContext(config: SparkConf) extends Logging {
+     )
+   }
+ 
++<<<<<<< HEAD
++  private[spark] val isSSparkLogEnabled = conf.getBoolean("spark.ssparkLog.enabled", false)
++  private[spark] var isSSparkOptimizeEnabled = conf.getBoolean("spark.ssparkOptimize.enabled", false)
++  //Optimize flag is can be changed at runtime
++  private[spark] val isSSparkProfileEnabled = conf.getBoolean("spark.ssparkProfile.enabled", false)
++  private[spark] val optimizeMode: String = conf.getOption("spark.sspark.optimizeMode").getOrElse("overlap")
++  // optimizeMode: "overlap" or "ahead"
++  private[spark] val cachePlan: String = conf.getOption("spark.sspark.cachePlan").getOrElse("refreshing")
++  // cachePlan: "refreshing" or "enhancing" or "pruning"
++  private[spark] val unpersistPlan = conf.getBoolean("spark.sspark.unpersistPlan", false)
++  // unpersistPlan: "true" is on, "false" is off
++  private[spark] val maxProfiling = conf.getInt("spark.sspark.maxProfiling", 1000)
++
++  if (cachePlan == "pruning" || cachePlan == "refreshing") {  // not sure for "refreshing" mode
++    cacheList = cacheCandidates.map(_.opId).toSet.to[HashSet]
++  }
++
++  logInfoSSP(s"== S-Spark: Steady-optimizing Spark configurations == \n" +
++    s"\t\t\t\t\t\t ProfileEnabled  = $isSSparkProfileEnabled \t (true or FALSE)\n" +
++    s"\t\t\t\t\t\t OptimizeEnabled = $isSSparkOptimizeEnabled \t (true or FALSE)\n" +
++    s"\t\t\t\t\t\t OptimizeMode    = $optimizeMode \t (OVERLAP or ahead)\n" +
++    s"\t\t\t\t\t\t CachePlan       = $cachePlan \t (REFRESHING or enhancing or pruning)\n" +
++    s"\t\t\t\t\t\t UnpersistPlan   = $unpersistPlan \t (true or FALSE)\n" +
++    s"\t\t\t\t\t\t LogEnabled      = $isSSparkLogEnabled \t (true or FALSE)\n" +
++    s"\t\t\t\t\t\t maxProfiling    = $maxProfiling \t (default: 1000)\n" +
++    s"\t\t\t\t\t\t #candidates     = ${cacheList.size}")
++=======
++  /*
++  def setOptimizeEnabled(value: Boolean) {
++    setLocalProperty("ss.optimize.enabled", value.toString)
++  }
++
++  def setUnpersistPlan(value: Boolean) {
++    setLocalProperty("ss.unpersist.plan", value.toString)
++  }
++
++  def getOptimizeEnabled: Boolean = {
++    getLocalProperty("ss.optimize.enabled") == "true"
++  }
++
++  def getUnpersistPlan: Boolean = {
++    getLocalProperty("ss.unpersist.plan") == "true"
++  }
++  */
++
++  logInfoSSP(s"== S-Spark: Steady-optimizing Spark configurations == \n" +
++    s"\t\t\t\t\t\t ProfileEnabled  = $isSSparkProfileEnabled\t\t\t(true or FALSE)\n" +
++    s"\t\t\t\t\t\t ProfileMax      = $maxProfile\t\t\t(default: 1000)\n" +
++    s"\t\t\t\t\t\t OptimizeEnabled = $isSSparkOptimizeEnabled\t\t\t(true or FALSE)\n" +
++    s"\t\t\t\t\t\t OptimizeMode    = $optimizeMode\t\t(OVERLAP or ahead)\n" +
++    s"\t\t\t\t\t\t MatureEnabled   = $isMature\t\t\t(true or FALSE)\n" +
++    s"\t\t\t\t\t\t CachePlan       = $cachePlan\t(REFRESHING or enhancing or pruning)\n" +
++    s"\t\t\t\t\t\t UnpersistPlan   = $unpersistPlan\t\t\t(true or FALSE) \n" +
++    s"\t\t\t\t\t\t LogEnabled      = $isSSparkLogEnabled\t\t\t(true or FALSE)\n" +
++    s"\t\t\t\t\t\t #candidates     = ${cacheCandidates.size},  #cacheList = ${cacheList.size}")
++>>>>>>> LOSIC
++
++  // SSPARK: We classify rdd transformation operation into three types.
++  val predictableOps = Array("objectFile", 
++                             "sequenceFile", 
++                             "textFile", 
++                             "distinct", 
++                             "partitionBy", 
++                             "groupByKey", 
++                             "join")
++  val constantOps = Array("sortByKey", 
++                          "zip", 
++                          "zipPartitions", 
++                          "zipWithIndex", 
++                          "sample", 
++                          "randomSplit")
++  val functionalOps = Array("map", 
++                            "mapPartitions", 
++                            "mapPartitionsWithIndex", 
++                            "mapValues", 
++                            "flatMap", 
++                            "filter")
++  /* val shuffleOps = Array("treeAggregate", "aggregate", ...)
++    We don't need to distinguish shuffle operations, just assume that unrecognized operations as a shuffle 
++    or not-to be optimized
++  */
++<<<<<<< HEAD
++=======
++
++  val rddSize = HashMap[Int, Double]()
++  val countMap = HashMap[Int, Int]()
++  val reuseRddSize = HashMap[Int, Double]()
++>>>>>>> LOSIC
++  
++  val accumScope = HashMap[Int, String]()
++  def newRddCallSite[T](scope: T): String = { // must handle None case
++    val scopeId = scope match {
++      case None => -1
++      case x: Option[RDDOperationScope] => x.get.id.toInt
++    }
++    
++    val tmpStr = getCallSite.shortForm.split(" at ")
++    var callSite = ""
++    if (tmpStr.length == 2) {
++      callSite = tmpStr(0).filterNot(_.isWhitespace) + "(" + tmpStr(1).filterNot(_.isWhitespace)
++    }
++    else
++      logErrorSSP(s"Cannot get correct callSite ${tmpStr}")
++
++    var newCallSite = ""
++    if (accumScope.contains(scopeId)) {
++      val newColumn = {
++        if (callSite.startsWith("randomSplit")) 1
++        else 0
++      }
++      newCallSite = callSite + ":" + newColumn.toString + ")"
++      accumScope.put(scopeId, newCallSite)
++    }
++    else { // not same scopeId
++      val newColumn = {
++        val getSameLine = accumScope.find(x => x._2.startsWith(callSite))
++        if (getSameLine != None) {
++          getSameLine.maxBy(x => x._1)._2.split(":")(2).replace(")", "").toInt + 1
++        }
++        else 0
++      }
++      newCallSite = callSite + ":" + newColumn.toString + ")"
++      accumScope.put(scopeId, newCallSite)
++    }
++    newCallSite
++  }
++<<<<<<< HEAD
++  
++  @deprecated
++  def newRddCallSite_depr(scopeId: Int): String = {
++    val tmpStr = getCallSite.shortForm.split(" at ")
++    var callSite = ""
++    if (tmpStr.length == 2) {
++      callSite = tmpStr(0).filterNot(_.isWhitespace) + "(" + tmpStr(1).filterNot(_.isWhitespace)
++    }
++    else
++      logErrorSSP(s"Cannot get correct callSite ${tmpStr}")
++
++    var newCallSite = ""
++    if (accumScope.contains(scopeId)) {
++      val newColumn = {
++        if (callSite.startsWith("randomSplit")) 1
++        else 0
++      }
++      newCallSite = callSite + ":" + newColumn.toString + ")"
++      accumScope.put(scopeId, newCallSite)
++    }
++    else { // not same scopeId
++      val newColumn = {
++        val getSameLine = accumScope.find(x => x._2.startsWith(callSite))
++        if (getSameLine != None) {
++          getSameLine.maxBy(x => x._1)._2.split(":")(2).replace(")", "").toInt + 1
++        }
++        else 0
++      }
++      newCallSite = callSite + ":" + newColumn.toString + ")"
++      accumScope.put(scopeId, newCallSite)
++    }
++    newCallSite
++  }
++  
++=======
++    
++>>>>>>> LOSIC
++  def isShuffleOp(op: String): Boolean = {
++    !(predictableOps.contains(op) | constantOps.contains(op) | functionalOps.contains(op))
++  }
++  
++  class LineageInfo(val _name: String,
++                    val _callSite: String) {   
++    val deps = new HashSet[Int]()   /*  change variable and method names from parent to deps
++                                     *  because, RDG needs same variables, but child not parent
++                                     */
++
++    val name = _name
++    val callSite = _callSite
++    var count = 0
++<<<<<<< HEAD
++=======
++    var isHadoopRDD = false
++>>>>>>> LOSIC
++
++    def addDeps(p: Int): Unit = {
++      deps.add(p)
++    }
++    def addDeps(p: HashSet[Int]): Unit = {
++      p.map(x => deps.add(x))
++    }
++    override def toString(): String = {
++      val countStr = if (count != 0) s" Count: ${count}" else ""
++      s"${name}(${callSite}) Dep:${deps}${countStr}"
++    }
++  }
++  
++<<<<<<< HEAD
++  class CandidatesInfo(val _opId: String) {
++=======
++  class CandidatesInfo(val _opId: String) extends Cloneable {
++>>>>>>> LOSIC
++    val opId = _opId
++    var inputSize: Double = 0
++    var resultSize: Double = 0
++    var time: Double = 0
++    var counts: Int = 0
++    var isCached: Boolean = false
++<<<<<<< HEAD
++    val parents = new HashSet[String]()
++=======
++    var parents = new HashSet[String]()
++
++    override def clone(): CandidatesInfo = super.clone().asInstanceOf[CandidatesInfo]
++>>>>>>> LOSIC
++
++    def setCached(_isCached: Boolean): Unit = {
++      isCached = _isCached
++    }
++
++    def addParents(p: String): Unit = {
++      parents.add(p)
++    }
++
++    def addParents(p: HashSet[String]): Unit = {
++      p.foreach(x => parents.add(x))
++    }
++
++    def isKnown: Boolean = {
++      time match {
++        case 0 => false
++        case _ => true
++      }
++    }
++
++    override def toString: String = {
++<<<<<<< HEAD
++      //s"$opId, InputSize:$inputSize, ResultSize:$resultSize, Time:$time, Counts:$counts, $isCached, $parents"
++=======
++>>>>>>> LOSIC
++      s"$opId($inputSize, $resultSize, $time) x$counts, $isCached, $parents"
++    }
++  }
++
++<<<<<<< HEAD
++  //var opTimePerInAccum = HashSet[(String, Long, Long)]()
++  //var opOutPerInAccum = HashSet[(String, Long, Long)]()
++  private[spark] var candidatesOnStage = (LinkedHashSet[CandidatesInfo](), LinkedHashSet[CandidatesInfo]())
++  // candidatesOnStage._1 is a set of persist candidates and ._2 is a set of unpersist candidates.
++
++=======
++  private[spark] var candidatesOnStage = LinkedHashSet[CandidatesInfo]()
++  
++>>>>>>> LOSIC
++  class CandidatesCombination {
++      val nodes = new HashSet[String]()
++      var benefit: Double = 0
++      var sumSize: Double = 0
++
++      override def toString: String = {
++        s"Nodes: ${nodes.mkString(", ")} Benefit: $benefit, SumSize: $sumSize"
++      }
++  }
++
++<<<<<<< HEAD
++=======
++  def makeClusterWithPruning(ancestors: LinkedHashSet[CandidatesInfo]): Unit = {
++    val visited = HashSet[CandidatesInfo]()
++
++    def deleteNode(ancestors: LinkedHashSet[CandidatesInfo], node: CandidatesInfo): Unit = {
++      val parents = node.parents
++      val children = ancestors.filter(_.parents.contains(node.opId))
++
++      children.foreach { child =>
++        child.parents = parents
++        child.time += node.time
++      }
++      ancestors.remove(node)
++    }
++
++    def self(node: CandidatesInfo, minSize: Double, counts: Int, cluster: LinkedHashSet[CandidatesInfo])
++            : Unit = {
++      visited.add(node)
++      var _minSize = minSize
++      if (node.counts == counts) {
++        cluster.add(node)
++        if (node.resultSize >= minSize) {
++          _minSize = node.resultSize
++          deleteNode(ancestors, node)
++        }
++      }
++      val parents = node.parents.flatMap(y => ancestors.find(_.opId == y))
++                    .filterNot(x => visited.contains(x))
++      parents.foreach(self(_, _minSize, counts, cluster))
++    }
++
++    val candidatesLeaves = ancestors.filter{ x =>
++      val parentsWithSameCounts = x.parents.flatMap(y => ancestors.find(_.opId == y).filter(_.counts == x.counts))
++      val childrenWithSameCounts = ancestors.filter(_.parents.contains(x.opId)).filter(_.counts == x.counts)
++      if (parentsWithSameCounts.nonEmpty
++        && parentsWithSameCounts.size == x.parents.size
++        && childrenWithSameCounts.size == 0) {
++        true
++      }
++      else {
++        false
++      }
++    }
++
++    candidatesLeaves.foreach { leaf =>
++      val cluster = new LinkedHashSet[CandidatesInfo]
++      val minSize = leaf.resultSize
++      self(leaf, minSize, leaf.counts, cluster)
++    }
++  }
++
++>>>>>>> LOSIC
++  def regression_powerModel(opName: String, 
++                              readed: HashSet[(String, Double, Double)])
++                             : (Double, Double, Double) = {
++    import breeze.linalg._
++    import breeze.stats.regression._
++    import breeze.numerics._
++    import breeze.stats._
++
++<<<<<<< HEAD
++    // if opName is a predictable , functional , constant....
++    
++=======
++>>>>>>> LOSIC
++    val x = DenseVector(readed.toSeq.map(_._2).toArray)
++    val y = DenseVector(readed.toSeq.map(_._3).toArray)
++
++    val logX = breeze.numerics.log(x)
++    val logY = breeze.numerics.log(y)
++
++    val X = DenseMatrix.horzcat(logX.asDenseMatrix.t, DenseMatrix.ones[Double](logX.length, 1))
++
++    val leastSquaresResult = leastSquares(X, logY)
++    val coefficients = leastSquaresResult.coefficients
++
++    val a = math.exp(coefficients(1))
++    val b = coefficients(0)
++
++    val yPred = x.map(xi => a * math.pow(xi, b))
++
++    val ssTotal = sum((y - mean(y)) ^:^ 2.0)
++    val ssRes = sum((y - yPred) ^:^ 2.0)
++    val rSquared = 1 - (ssRes / ssTotal)
++
++    logInfoSSP(s"Power model for $opName: y = $a * x^$b with R^2 $rSquared", isSSparkLogEnabled)
++    (a, b, rSquared)  // coefficient a and b
++  }
++
++  def regression_linearModel(opName: String, 
++                              readed: HashSet[(String, Double, Double)])
++                            : (Double, Double, Double) = {
++    import breeze.linalg._
++    import breeze.stats.regression._
++    import breeze.numerics._
++    import breeze.stats._
++
++    val x = DenseVector(readed.toSeq.map(_._2).toArray)
++    val y = DenseVector(readed.toSeq.map(_._3).toArray)
++
++    val X = DenseMatrix.horzcat(x.asDenseMatrix.t, DenseMatrix.ones[Double](x.length, 1))
++
++    val leastSquaresResult = leastSquares(X, y)
++    val coefficients = leastSquaresResult.coefficients
++
++    val a = coefficients(0)
++    val b = coefficients(1)
++    
++    val yPred = x.map(xi => a * xi + b)
++
++    val ssTotal = sum((y - mean(y)) ^:^ 2.0)
++    val ssRes = sum((y - yPred) ^:^ 2.0)
++    val rSquared = 1 - (ssRes / ssTotal)
++
++    logInfoSSP(s"Linear model for $opName: " +
++      s"y = $a * x + $b with R^2 $rSquared", isSSparkLogEnabled)
++    (a, b, rSquared)  // coefficient a and b
++  }
++
++  def regression_polynomial2dModel(opName: String, 
++                                    readed: HashSet[(String, Double, Double)])
++                                  : (Double, Double, Double, Double) = {
++    import breeze.linalg._
++    import breeze.stats.regression._
++    import breeze.numerics._
++    import breeze.stats._
++    
++    val x = DenseVector(readed.toSeq.map(_._2).toArray)
++    val y = DenseVector(readed.toSeq.map(_._3).toArray)
++
++    val X = DenseMatrix.horzcat(
++      x.map(xi => xi * xi).asDenseMatrix.t, 
++      x.asDenseMatrix.t,                    
++      DenseMatrix.ones[Double](x.length, 1) 
++    )
++    val leastSquaresResult = leastSquares(X, y)
++    val coefficients = leastSquaresResult.coefficients
++
++    val a2 = coefficients(0)
++    val a1 = coefficients(1)
++    val b = coefficients(2)
++
++    val yPred = x.map(xi => a2 * xi * xi + a1 * xi + b)
++
++    val ssTotal = sum((y - mean(y)) ^:^ 2.0)
++    val ssRes = sum((y - yPred) ^:^ 2.0)
++    val rSquared = 1 - (ssRes / ssTotal)
++
++    logInfoSSP(s"Polynomial2d model for $opName: " +
++      s"y = $a2 * x^2 + $a1 * x + $b with R^2 $rSquared", isSSparkLogEnabled)
++    (a2, a1, b, rSquared) // coefficient a2, a1, and b
++  }
++  
++  def regression_polynomial3dModel(opName: String, 
++                                    readed: HashSet[(String, Double, Double)])
++                                  : (Double, Double, Double, Double, Double) = {
++    import breeze.linalg._
++    import breeze.stats.regression._
++    import breeze.numerics._
++    import breeze.stats._
++    
++    val x = DenseVector(readed.toSeq.map(_._2).toArray)
++    val y = DenseVector(readed.toSeq.map(_._3).toArray)
++
++    val X = DenseMatrix.horzcat(
++      x.map(xi => xi * xi * xi).asDenseMatrix.t, 
++      x.map(xi => xi * xi).asDenseMatrix.t,      
++      x.asDenseMatrix.t,                         
++      DenseMatrix.ones[Double](x.length, 1)      
++    )
++    val leastSquaresResult = leastSquares(X, y)
++    val coefficients = leastSquaresResult.coefficients
++
++    val a3 = coefficients(0)
++    val a2 = coefficients(1)
++    val a1 = coefficients(2)
++    val b = coefficients(3)
++
++    val yPred = x.map(xi => a3 * xi * xi * xi + a2 * xi * xi + a1 * xi + b)
++
++    val ssTotal = sum((y - mean(y)) ^:^ 2.0)
++    val ssRes = sum((y - yPred) ^:^ 2.0)
++    val rSquared = 1 - (ssRes / ssTotal)
++
++    logInfoSSP(s"Polynomial3d model for $opName: " +
++      s"y = $a3 * x^3 + $a2 * x^2 + $a1 * x + $b with R^2 $rSquared", isSSparkLogEnabled)
++    (a3, a2, a1, b, rSquared) // coefficient a3, a2, a1, and b
++  }
++
++  def y_powerModel(coeffA: Double, coeffB: Double, x: Double)
++                  : Double = {
++    //xi => a * math.pow(xi, b)
++    coeffA * math.pow(x, coeffB)
++  }
++  def y_linearModel(coeffA: Double, coeffB: Double, x: Double)
++                    : Double = {
++    //xi => a * xi + b
++    coeffA * x + coeffB
++  }
++  def y_polynomial2dModel(coeffA2: Double, coeffA1: Double, coeffB: Double, x: Double)
++                          : Double = {
++    //xi => a2 * xi * xi + a1 * xi + b
++    coeffA2 * x * x + coeffA1 * x + coeffB
++  }
++  def y_polynomial3dModel(coeffA3: Double, coeffA2: Double, coeffA1: Double, coeffB: Double, x: Double): 
++                          Double = {
++    //xi => a3 * xi * xi * xi + a2 * xi * xi + a1 * xi + b
++    coeffA3 * x * x * x + coeffA2 * x * x + coeffA1 * x + coeffB
++  }
++
++  // opId = opName(newCallSite), sizeOrTime = "size" or "time"
++  def readProfiling(opId: String, sizeOrTime: String): (String, HashSet[(String, Double, Double)]) = { 
++    val opName = opId.split('(')(0)
++    val filePath = Paths.get(profilingDir + "/" + opName + "_" + sizeOrTime + ".csv")
++    val readed = HashSet[(String, Double, Double)]()
++    if (Files.exists(filePath)) {
++      val fileReader = Source.fromFile(filePath.toString)
++      for (line <- fileReader.getLines()) {
++        val tmpTokens = line.split(',')
++        val candName = tmpTokens(0)//,filterNot(_.isWhitespace)
++        val firstItem = tmpTokens(1).toDouble   // input size
++        val secondItem = tmpTokens(2).toDouble  // time from _time, output size from _size
++        readed.add( (candName, firstItem, secondItem) ) // duplicated value will be eliminated
++      }
++      fileReader.close()
++    }
++    (opName, readed)
++  }
++
++  def makeOpId(rddId: Int): String = {
++    val localLineage = lineages.values.flatMap(_.values).find(_.contains(rddId))
++    if (localLineage.isDefined) {
++      val node = localLineage.get.get(rddId)
++      s"${node.get.name}(${node.get.callSite})"
++    }
++    else {
++      logErrorSSP(s"Cannot get node ${rddId}")
++      ""
++    }
++  }
++
++  def makeCandidatesOnStage(candidatesOnLineage: LinkedHashMap[Int, LineageInfo])
++<<<<<<< HEAD
++    : (LinkedHashSet[CandidatesInfo], LinkedHashSet[CandidatesInfo]) = {
++    val result = (LinkedHashSet[CandidatesInfo](), LinkedHashSet[CandidatesInfo]())
++=======
++    : LinkedHashSet[CandidatesInfo] = {
++    val result = LinkedHashSet[CandidatesInfo]()
++>>>>>>> LOSIC
++    val leafNode = candidatesOnLineage.head._1
++
++    def self(rddId: Int, result: LinkedHashSet[CandidatesInfo]): Unit = {
++      candidatesOnLineage.find(x => x._1 == rddId) match {
++        case Some(node) =>
++          val opId = makeOpId(node._1)
++          val parents = node._2.deps
++          val parentsId = HashSet[String]()
++          parents.filterNot(x => x == -1 || x == -2 || x == -3).foreach{ x =>
++            parentsId.add(makeOpId(x))
++          }
++          cacheCandidates.find(x => x.opId == opId && x.parents.equals(parentsId)) match {
++            case Some(candidate) =>
++              result += candidate
++            case None =>
++          }
++          parents.filter(x => candidatesOnLineage.contains(x)).foreach(self(_, result))
++        case None =>
++      }
++    }
++<<<<<<< HEAD
++    self(leafNode, result._1)
++    result._1.foreach { x =>
++      x.inputSize = 0
++      x.resultSize = 0
++      x.time = 0
++      val remainingCounts = x.counts - 1
++      if (unpersistPlan) {
++        if (remainingCounts > -1) {
++          x.counts = remainingCounts
++        }
++        else {
++          result._1.remove(x)
++          result._2.add(x)
++        }
++      }
++      else {
++=======
++
++    self(leafNode, result)
++    
++    result.foreach { x =>
++      val remainingCounts = x.counts - 1
++      if (remainingCounts >= 0) {
++>>>>>>> LOSIC
++        x.counts = remainingCounts
++      }
++    }
++    result
++  }
++
++  def getValueFromRegression(readed: HashSet[(String, Double, Double)], 
++                              opName: String, 
++                              inputSize: Double, 
++                              sizeOrTime: String): Double = {
++    var resultValue: Double = 0 // this value should be time or resultSize
++<<<<<<< HEAD
++=======
++    logInfoSSP(s"getValueFromRegression: try to get $sizeOrTime of $opName with input $inputSize", isSSparkLogEnabled)
++>>>>>>> LOSIC
++    try {
++      if (readed.size > 1) {
++        logInfoSSP(s"Try to makeRegressionModel LINEAR $sizeOrTime for $opName", isSSparkLogEnabled)
++        val (a, b, rSquared) = regression_linearModel(opName, readed)
++        if (rSquared < 0.75) {
++          logInfoSSP(s"Try to makeRegressionModel POLY2DIM for $sizeOrTime $opName", isSSparkLogEnabled)
++          val (a2, a1, b, rSquared) = regression_polynomial2dModel(opName, readed)
++          if (rSquared < 0.75) {
++            logInfoSSP(s"Try to makeRegressionModel POLY3DIM for $sizeOrTime $opName", isSSparkLogEnabled)
++            val (a3, a2, a1, b, rSquared) = regression_polynomial3dModel(opName, readed)
++            resultValue = y_polynomial3dModel(a3, a2, a1, b, inputSize)
++          }
++          else {
++            resultValue = y_polynomial2dModel(a2, a1, b, inputSize)
++          }
++        }
++        else {
++<<<<<<< HEAD
++          resultValue = y_linearModel(a, b, inputSize)
++=======
++          resultValue = y_linearModel(a, b, inputSize) 
++>>>>>>> LOSIC
++        }
++      }
++    } catch {
++      case e: Exception =>
++<<<<<<< HEAD
++        isSSparkOptimizeEnabled = false
++        logWarningSSP(s"cannot find a regressionModel for ${opName}... OptimizeEnabled has set false")
++    }
++    if (resultValue < 0) {
++      logWarningSSP(s"Predicted Y $sizeOrTime value of $opName is $resultValue -> 0", isSSparkLogEnabled)
++      resultValue = 0
++=======
++        //isSSparkOptimizeEnabled = false
++        logWarningSSP(s"cannot find a regressionModel for ${opName}... ") //OptimizeEnabled has set false")
++        if (sizeOrTime == "size")
++          resultValue = inputSize * 0.01
++        else if (sizeOrTime == "time")
++          resultValue = 0
++    }
++    if (resultValue < 0) {
++      if (sizeOrTime == "size") {
++        logWarningSSP(s"Predicted Y $sizeOrTime value of $opName is $resultValue -> ${inputSize * 0.01}", isSSparkLogEnabled)
++        resultValue = inputSize * 0.01
++      }
++      else if (sizeOrTime == "time") {
++        logWarningSSP(s"Predicted Y $sizeOrTime value of $opName is $resultValue -> 0", isSSparkLogEnabled)
++        resultValue = 0
++      }
++>>>>>>> LOSIC
++    }
++    else {
++      logInfoSSP(s"Predicted Y $sizeOrTime value of $opName  = $resultValue", isSSparkLogEnabled)
++    }
++    
++    resultValue
++  }
++
++  def setSizeOfCandidates(ancestors: LinkedHashSet[CandidatesInfo], stageInput: Long): Unit = { // Top-down
++    val visited = HashSet[CandidatesInfo]()
++    def self(node: CandidatesInfo): Unit = {
++      visited.add(node)
++      val op = node.opId.split('(')(0)
++      var resultSize: Double = 0
++      val (opName, readedSize) = readProfiling(node.opId, "size")
++        readedSize ++= dagScheduler.opOutPerIn.filter(x => x._1.startsWith(opName+"("))
++                                .map{x => 
++                                  logInfoSSP(s"added accumulator size info. ${(x._1, x._2.toFloat / Math.pow(2,20), x._3.toFloat / Math.pow(2,20))}", isSSparkLogEnabled)
++                                  (x._1, x._2.toFloat / Math.pow(2,20), x._3.toFloat / Math.pow(2,20))
++                                }
++
++      if (functionalOps.contains(op)) { 
++        val readedWithSameOpId = readedSize.filter(_._1 == node.opId)
++        resultSize = getValueFromRegression(readedWithSameOpId, opName, node.inputSize, "size")
++      }
++      /* Don't need to distinguish constantOps 
++      else if (constantOps.contains(op)){
++        resultSize = getValueFromRegression(readedSize, opName, node.inputSize, "size")
++      } */
++      else {  // predictable
++        resultSize = getValueFromRegression(readedSize, opName, node.inputSize, "size")
++      }
++
++      node.resultSize = resultSize  
++      val children = ancestors.filter(x => x.parents.contains(node.opId)).filterNot(x => visited.contains(x))
++<<<<<<< HEAD
++      logInfoSSP(s"Node visited ${node.opId} -> ${children.map(_.opId)}")
++      children.foreach { x =>   
++        x.inputSize += resultSize
++=======
++      logInfoSSP(s"Node visited ${node.opId} -> ${children.map(_.opId)}", isSSparkLogEnabled)
++      children.foreach { x =>   
++        x.inputSize = resultSize
++>>>>>>> LOSIC
++        self(x)
++      }
++    }
++
++    val rootNode = ancestors.find(x => x.opId == makeOpId(rootLineage.last))
++      // ancestors.find(_.parents.isEmpty)
++    rootNode match {
++      case Some(x) =>
++        x.inputSize = stageInput / Math.pow(2,20)
++        self(x)
++      case None => 
++        logErrorSSP(s"Cannot find root node in persist candidates RDD id ${rootLineage.last}")
++    }
++  }
++
++  // Do not need Top-down, because time can be calculated by inputSize of itself
++  def setTimeOfCandidates(ancestors: LinkedHashSet[CandidatesInfo]): Unit = {
++    ancestors.foreach{ node =>
++      val op = node.opId.split('(')(0)
++      var resultTime: Double = 0
++      val (opName, readedTime) = readProfiling(node.opId, "time")
++      readedTime ++= dagScheduler.opTimePerIn.filter(x => x._1.startsWith(opName+"("))
++                              .map{x => 
++                                logInfoSSP(s"added accumulator time info. ${(x._1, x._2.toFloat / Math.pow(2,20), x._3.toFloat / 1e9)}", isSSparkLogEnabled)
++                                (x._1, x._2.toFloat / Math.pow(2,20), x._3.toFloat / 1e9)
++                              }
++
++      if (functionalOps.contains(op)) { 
++        //HashSet[(String, Double, Double)
++        val readedWithSameOpId = readedTime.filter(_._1 == node.opId)
++        resultTime = getValueFromRegression(readedWithSameOpId, opName, node.inputSize, "time")
++      }
++      else if (constantOps.contains(op)){
++        resultTime = readedTime.maxBy(_._3)._3
++      } 
++      else {  // predictable
++        resultTime = getValueFromRegression(readedTime, opName, node.inputSize, "time")
++      }
++      node.time = resultTime
++    }
++  }
++  
++  def findTopNodes(ancestors: LinkedHashSet[CandidatesInfo]): LinkedHashSet[CandidatesInfo] = {
++    ancestors.filter(node => node.parents.isEmpty)
++  }
++
++<<<<<<< HEAD
++=======
++  /*
++>>>>>>> LOSIC
++  def calculateBenefitFromTopDown(
++                                    node: CandidatesInfo,
++                                    selectedNodes: HashSet[String],
++                                    allNodes: LinkedHashSet[CandidatesInfo],
++                                    benefit: Double,
++                                    currentTime: Double
++                                  ): Double = {
++    var accumulatedBenefit = benefit
++    var accumulatedTime = currentTime + node.time
++
++    if (selectedNodes.contains(node.opId)) {
++      accumulatedBenefit += accumulatedTime * node.counts 
++      // counts has reduced already by calling makeCandidatesOnStage() (getAncestors())
++      accumulatedTime = 0.0
++    }
++    for (child <- allNodes.filter(_.parents.contains(node.opId))) {
++<<<<<<< HEAD
++=======
++      logInfoSSP(s"calculateBenefit: ${node.opId} => ${child.opId}")
++>>>>>>> LOSIC
++      accumulatedBenefit = calculateBenefitFromTopDown(child, selectedNodes, allNodes, 
++                                                      accumulatedBenefit, accumulatedTime)
++    }
++    accumulatedBenefit
++<<<<<<< HEAD
++=======
++  }*/
++
++  def calculateBenefitFromTopDown(
++                                 node: CandidatesInfo,
++                                 selectedNodes: HashSet[String],
++                                 allNodes: LinkedHashSet[CandidatesInfo],
++                                 benefit: Double,
++                                 currentTime: Double,
++                                 timeMap: HashMap[String, Double] = HashMap(),
++                                 visited: HashSet[String] = HashSet()
++                               ): Double = {
++
++    if (visited.contains(node.opId)) {
++      return benefit
++    }
++
++    visited.add(node.opId) 
++
++    var accumulatedBenefit = benefit
++    val newTime = currentTime + node.time
++
++    if (selectedNodes.contains(node.opId)) {
++      accumulatedBenefit += newTime * node.counts
++      timeMap.update(node.opId, 0.0)
++    } else {
++      timeMap.update(node.opId, timeMap.getOrElse(node.opId, 0.0) + newTime)
++    }
++
++    for (child <- allNodes.filter(_.parents.contains(node.opId))) {
++      //logInfoSSP(s"calculateBenefit: ${node.opId} => ${child.opId}")
++      accumulatedBenefit = calculateBenefitFromTopDown(
++        child,
++        selectedNodes,
++        allNodes,
++        accumulatedBenefit,
++        timeMap(node.opId),
++        timeMap,
++        visited 
++      )
++    }
++    accumulatedBenefit
++>>>>>>> LOSIC
++  }
++
++  def generateCombinations(ancestors: LinkedHashSet[CandidatesInfo]): HashSet[CandidatesCombination] = {
++    val combinations = new HashSet[CandidatesCombination]()
++    val topNodes = findTopNodes(ancestors)
++    val totalCombinations = 1 << ancestors.size // 2^n
++    val ancestorsList = ancestors.toList
++
++    for (i <- 0 until totalCombinations) {
++      val combination = new CandidatesCombination()
++
++      for (j <- ancestorsList.indices) {
++        if ((i & (1 << j)) != 0) {
++          val node = ancestorsList(j)
++          combination.nodes.add(node.opId)
++          combination.sumSize += node.resultSize
++        }
++      }
++
++      for (topNode <- topNodes) {
++        combination.benefit += calculateBenefitFromTopDown(topNode, combination.nodes, ancestors, 0.0, 0.0)
++      }
++      combinations.add(combination)
++    }
++    combinations
++  }
++
++  def findBestCombination(combinations: HashSet[CandidatesCombination], 
++                          remainingMem: Double): Option[CandidatesCombination] = {
++    val validCombinations = combinations.filter(_.sumSize <= remainingMem)
++    
++    if (validCombinations.nonEmpty) {
++      Some(validCombinations.maxBy(c => (c.benefit, -c.sumSize))) // maximize benefit, minimize sumSize
++    } else {
++      None
++    }
++  }
++<<<<<<< HEAD
++    
++  def selectCandidates(stageId: Int, stageInput: Long): Unit = {
++    @deprecated // inner function of getAncestors
++    def findAncestors(nodeId: String, result: LinkedHashSet[CandidatesInfo]): Unit = {
++      cacheCandidates.find(_.opId == nodeId) match {
++        case Some(candidate) =>
++          if (!result.contains(candidate)) {
++            result += candidate
++            candidate.parents.foreach(parentId => findAncestors(parentId, result))
++          }
++        case None =>
++      }
++    }
++
++    @deprecated // getAncestors has some error for handling duplicated opIds, replaced it with makeCandidatesOnStage()
++    def getAncestors(startNodeId: String): LinkedHashSet[CandidatesInfo] = {
++      val result = LinkedHashSet[CandidatesInfo]()
++      findAncestors(startNodeId, result)
++      result.foreach { x =>
++        x.inputSize = 0
++        x.resultSize = 0
++        x.time = 0
++        x.counts -= 1
++      }
++      result
++    }
++
++    // start point of selectCandidates
++=======
++
++  def makeCacheListViaMimicRun(rdg: HashMap[Int, LineageInfo], cacheCandidates: LinkedHashSet[CandidatesInfo]): Unit = {
++    val actionNodes: LinkedHashMap[Int, LineageInfo] = LinkedHashMap(rdg.filter(_._2.name == "Action").toSeq.sortBy(_._1): _*)
++    val jobVisited = new LinkedHashSet[String]
++    val visitedCandidatesOnJob = new HashSet[LinkedHashSet[CandidatesInfo]]
++    var predictedMem: Double = getRemainingStorageMem() / Math.pow(2,20)
++
++    def makeCandidatesOnJob(opSeqOnJob: LinkedHashSet[String]): LinkedHashSet[CandidatesInfo] = {
++      val candidatesOnJob: LinkedHashSet[CandidatesInfo] = cacheCandidates.filter(x => opSeqOnJob.contains(x.opId))
++      candidatesOnJob.foreach(_.counts -= 1)
++
++      val unpersistList = candidatesOnJob.filter(_.counts <= 0)
++      predictedMem += unpersistList.toSeq.map(_.resultSize).sum
++
++      candidatesOnJob
++    }
++
++    def self(nodeKey: Int): Unit = {
++      val opId = s"${rdg.get(nodeKey).get.name}(${rdg.get(nodeKey).get.callSite})"
++      jobVisited.add(opId)
++      val parents = rdg.filter(x => x._2.deps.contains(nodeKey))
++      parents.foreach( x => self(x._1))
++    }
++
++    actionNodes.foreach { action =>
++      jobVisited.clear()
++      self(action._1)
++
++      val candidatesOnJob = makeCandidatesOnJob(jobVisited)
++
++      if (!visitedCandidatesOnJob.contains(candidatesOnJob) && candidatesOnJob.nonEmpty) {
++        visitedCandidatesOnJob.add(candidatesOnJob)
++
++        val maxSizeOfCandidates: Double = candidatesOnJob.toSeq.map(_.resultSize).sum
++        if (predictedMem >= maxSizeOfCandidates) {
++          cacheList ++= candidatesOnJob.map(_.opId).toSet.to[HashSet]
++          predictedMem -= maxSizeOfCandidates
++        }
++        else {  // insufficient memory
++          val combinations = generateCombinations(candidatesOnJob)
++          val bestCombination = findBestCombination(combinations, predictedMem)
++          unpersistPlan = true
++          setUnpersistPlan(unpersistPlan)
++          
++          bestCombination match {
++            case Some(combination) =>
++              cacheList ++= combination.nodes
++              predictedMem -= combination.sumSize
++            case None =>
++              
++          }
++        }
++      }
++    }
++    logInfoSSP(s"Cache List => $cacheList", isSSparkLogEnabled)
++  }
++
++  def selectCandidates(stageInput: Long): Unit = {  // Mature case, only stage 0
++    val remainingMem = getRemainingStorageMem() / Math.pow(2,20)
++    val localCacheCandidates: LinkedHashSet[CandidatesInfo] = cacheCandidates.map(_.clone())
++    
++    val opIdSet = localCacheCandidates.map(_.opId).toSet
++    val nonParentsNodes = localCacheCandidates
++      .filterNot { candidate => 
++        candidate.parents.forall(opIdSet.contains)  
++      }
++      .flatMap { candidate => 
++        readedRDG.find {
++          case (key, lineageInfo) =>
++            val tmpOpId = s"${lineageInfo.name}(${lineageInfo.callSite})"
++            tmpOpId == candidate.opId
++        }.map(_._1)
++      }.to[HashSet]
++    
++    nonParentsNodes.foreach { x => 
++      val parents = readedRDG.filter(y => y._2.deps.contains(x)).map(_._1).toSet.to[HashSet]
++      
++      def self(rdd: Int): Unit = {
++        val tmpOpId = s"${readedRDG(rdd).name}(${readedRDG(rdd).callSite})"
++        if (localCacheCandidates.find(_.opId == tmpOpId).isEmpty) {
++          val parents = readedRDG.filter(y => y._2.deps.contains(rdd))
++          val parentsOpIds = parents.map(x => s"${x._2.name}(${x._2.callSite})").toSet.to[HashSet]
++          if (!(parentsOpIds.size == 1 && parentsOpIds.last == tmpOpId)) {
++            localCacheCandidates.add(new CandidatesInfo(tmpOpId))
++            localCacheCandidates.last.counts = readedRDG(rdd).count
++            localCacheCandidates.last.addParents(parentsOpIds)
++            logInfoSSP(s"Node added for candidate's parents: Node $tmpOpId with paretns $parentsOpIds", isSSparkLogEnabled)
++          }
++          parents.map(_._1).toSet.to[HashSet].foreach(self(_))
++        }
++      }
++      parents.foreach(self(_))
++    }
++
++    setSizeOfCandidates(localCacheCandidates, stageInput)
++    setTimeOfCandidates(localCacheCandidates)
++    val originCandidates = localCacheCandidates.filter(_.counts >= 2)
++    makeClusterWithPruning(originCandidates)
++    logInfoSSP(s"#candidates after pruning = ${originCandidates.size}")
++    makeCacheListViaMimicRun(readedRDG, originCandidates)
++  }
++
++  def selectCandidates(stageId: Int): Unit = { // Mature case, for every stage
++>>>>>>> LOSIC
++    val lineage = getLineage(stageId)
++
++    val candidatesOnLineage = lineage.filter { x =>
++      val opId = makeOpId(x._1)
++      cacheCandidates.exists(x => x.opId == opId)
++    }
++    logInfoSSP(s"candidatesOnLineage $candidatesOnLineage", isSSparkLogEnabled)
++
++    if (candidatesOnLineage.size == 0) {
++      logInfoSSP("No candidates on this stage", isSSparkLogEnabled)
++    }
++    else {
++<<<<<<< HEAD
++      //val leafCand = makeOpId(candidatesOnLineage.head._1)
++      //val candidatesOnStage = getAncestors(leafCand)
++      candidatesOnStage = makeCandidatesOnStage(candidatesOnLineage)
++      logInfoSSP(s"persist candidates ${candidatesOnStage._1} with leafCand ${makeOpId(candidatesOnLineage.head._1)}", isSSparkLogEnabled)
++
++      if ( candidatesOnStage._1.size != 0 ){   /** PageRank has this case, lineage like ( map <- distinct <- distinct <- distinct )
++                                                in Stage x with lineage ( distinct <- distinct )
++                                                the case of calling OP itself again was eliminated because of preventing infinite loop
++                                                So that in this case, candidatesOnLineage has distinct as a candidate,
++                                                but candidatesOnStage doesn't have.
++                                                However, in the previous stage, (map<-distinct) node is already scheduled as a candidate
++                                                So, it seems fine to skip for the (distinct<-distinct)
++                                            */
++        setSizeOfCandidates(candidatesOnStage._1, stageInput)
++        val remainingMem = getRemainingStorageMem() / Math.pow(2,20)
++        val maxSizeOfCandidates: Double = candidatesOnStage._1.toSeq.map(_.resultSize).sum
++        var localCacheList = HashSet[String]()
++        
++        // if there is no overhead, does it really need to divide into sufficient or insufficient case?
++        // it's hard to measure the accuracy of benefit in case of sufficient memory
++        if (remainingMem >= maxSizeOfCandidates) {  // sufficient memory
++          if (cachePlan == "refreshing")
++            cacheList = candidatesOnStage._1.map(_.opId).toSet.to[HashSet]
++          else if (cachePlan == "enhancing" || cachePlan == "pruning")
++            localCacheList = candidatesOnStage._1.map(_.opId).toSet.to[HashSet]
++          logInfoSSP(s"Sufficient mem ${remainingMem}MB: " +
++            s"All candidates on stage ${cacheList.mkString(", ")} " +
++            s"SumSize: ${maxSizeOfCandidates}MB", isSSparkLogEnabled)
++        }
++      
++        else {  // insufficient memory
++          setTimeOfCandidates(candidatesOnStage._1)
++          val combinations = generateCombinations(candidatesOnStage._1)
++          logInfoSSP(s"Combinations ${combinations}", isSSparkLogEnabled)
++          val bestCombination = findBestCombination(combinations, remainingMem)
++        
++          bestCombination match {
++            case Some(combination) =>
++              if (cachePlan == "refreshing")
++                cacheList = combination.nodes
++              else if (cachePlan == "enhancing" || cachePlan == "pruning")
++                localCacheList = combination.nodes
++              logInfoSSP(s"Insufficient mem ${remainingMem}MB: " +
++                s"Best combination found ${combination.nodes.mkString(", ")} " +
++                s"Benefit: ${combination.benefit} and SumSize: ${combination.sumSize}MB", isSSparkLogEnabled)
++            case None =>
++              if (cachePlan == "refreshing")
++                cacheList = HashSet()
++              else if (cachePlan == "enhancing" || cachePlan == "pruning")
++                localCacheList = HashSet()
++              logErrorSSP(s"Insufficient mem ${remainingMem}MB: " +
++                s"No valid combination found within the remaining memory.")
++          }
++        }
++        if (cachePlan == "enhancing")
++          cacheList ++= localCacheList
++        else if (cachePlan == "pruning") {
++          val unselectedNodes = candidatesOnStage._1.map(_.opId).toSet.to[HashSet].diff(localCacheList)
++          cacheList --= unselectedNodes
++        }
++      }
++      else {
++        logInfoSSP("No candidates on this stage or the candidates already have scheduled", isSSparkLogEnabled)
++      }
++    }
++
++    logInfoSSP(s"Candidates List=> $cacheCandidates", isSSparkLogEnabled)
++    logInfoSSP(s"Cache List => $cacheList")
++    //val remainingMem = getRemainingStorageMem()
++    //logInfoSSP(s"MEM: $remainingMem", isSSparkLogEnabled)
++=======
++      candidatesOnStage = makeCandidatesOnStage(candidatesOnLineage)
++    }
++    logInfoSSP(s"Candidates List on Stage $stageId=> $cacheCandidates", isSSparkLogEnabled)
++    logInfoSSP(s"Cache List => $cacheList", isSSparkLogEnabled)
++  }
++
++  val visitedCandidatesOnStage = new HashSet[LinkedHashSet[CandidatesInfo]]
++
++  def selectCandidates(stageId: Int, stageInput: Long): Unit = { // Immature case, for every stage
++    val lineage = getLineage(stageId)
++
++    val candidatesOnLineage = lineage.filter { x =>
++      val opId = makeOpId(x._1)
++      cacheCandidates.exists(x => x.opId == opId)
++    }
++    logInfoSSP(s"candidatesOnLineage $candidatesOnLineage", isSSparkLogEnabled)
++
++    if (candidatesOnLineage.size == 0) {
++      logInfoSSP("No candidates on this stage", isSSparkLogEnabled)
++    }
++    else {
++      candidatesOnStage = makeCandidatesOnStage(candidatesOnLineage)
++
++      if (!visitedCandidatesOnStage.contains(candidatesOnStage) && candidatesOnStage.nonEmpty) {
++        visitedCandidatesOnStage.add(candidatesOnStage)
++
++        logInfoSSP(s"persist candidates ${candidatesOnStage} with leafCand ${makeOpId(candidatesOnLineage.head._1)}", isSSparkLogEnabled)
++
++        if ( candidatesOnStage.size != 0 ){   /** PageRank has this case, lineage like ( map <- distinct <- distinct <- distinct )
++                                                  in Stage x with lineage ( distinct <- distinct )
++                                                  the case of calling OP itself again was eliminated because of preventing infinite loop
++                                                  So that in this case, candidatesOnLineage has distinct as a candidate,
++                                                  but candidatesOnStage doesn't have.
++                                                  However, in the previous stage, (map<-distinct) node is already scheduled as a candidate
++                                                  So, it seems fine to skip for the (distinct<-distinct)
++                                              */
++          setSizeOfCandidates(candidatesOnStage, stageInput)
++          val remainingMem = getRemainingStorageMem() / Math.pow(2,20)
++          val maxSizeOfCandidates: Double = candidatesOnStage.toSeq.map(_.resultSize).sum
++          var localCacheList = HashSet[String]()
++          
++          // if there is no overhead, does it really need to divide into sufficient or insufficient case?
++          // it's hard to measure the accuracy of benefit in case of sufficient memory
++          if (remainingMem >= maxSizeOfCandidates) {  // sufficient memory
++            //candidatesOnStage._1.foreach(_.isCached = true)
++            if (cachePlan == "refreshing")
++              cacheList = candidatesOnStage.map(_.opId).toSet.to[HashSet]
++            else if (cachePlan == "enhancing" || cachePlan == "pruning")
++              localCacheList = candidatesOnStage.map(_.opId).toSet.to[HashSet]
++            logInfoSSP(s"Sufficient mem ${remainingMem}MB: " +
++              s"All candidates on stage ${cacheList.mkString(", ")} " +
++              s"SumSize: ${maxSizeOfCandidates}MB", isSSparkLogEnabled)
++          }
++        
++          else {  // insufficient memory
++            logInfoSSP(s"Insufficient mem ${remainingMem}MB: " +
++              s"All candidates on stage ${cacheList.mkString(", ")} " +
++              s"SumSize: ${maxSizeOfCandidates}MB", isSSparkLogEnabled)
++            if (!unpersistForceDisabled){
++							unpersistPlan = true
++  	          setUnpersistPlan(unpersistPlan)
++						}
++            
++            setTimeOfCandidates(candidatesOnStage)
++            val combinations = generateCombinations(candidatesOnStage)
++            logInfoSSP(s"Combinations ${combinations}", isSSparkLogEnabled)
++            val bestCombination = findBestCombination(combinations, remainingMem)
++          
++            bestCombination match {
++              case Some(combination) =>
++                /*
++                candidatesOnStage._1.foreach { x => 
++                  if (combination.nodes.contains(x.opId)) {
++                    x.isCached = true
++                  }
++                }*/
++                if (cachePlan == "refreshing")
++                  cacheList = combination.nodes
++                else if (cachePlan == "enhancing" || cachePlan == "pruning")
++                  localCacheList = combination.nodes
++                logInfoSSP(s"Insufficient mem ${remainingMem}MB: " +
++                  s"Best combination found ${combination.nodes.mkString(", ")} " +
++                  s"Benefit: ${combination.benefit} and SumSize: ${combination.sumSize}MB", isSSparkLogEnabled)
++              case None =>
++                if (cachePlan == "refreshing")
++                  cacheList = HashSet()
++                else if (cachePlan == "enhancing" || cachePlan == "pruning")
++                  localCacheList = HashSet()
++                logErrorSSP(s"Insufficient mem ${remainingMem}MB: " +
++                  s"No valid combination found within the remaining memory.")
++            }
++          }
++          if (cachePlan == "enhancing")
++            cacheList ++= localCacheList
++          else if (cachePlan == "pruning") {
++            val unselectedNodes = candidatesOnStage.map(_.opId).toSet.to[HashSet].diff(localCacheList)
++            cacheList --= unselectedNodes
++          }
++        }
++        else {
++          logInfoSSP("No candidates on this stage or the candidates already have scheduled", isSSparkLogEnabled)
++        }
++      }
++      else {
++        logInfoSSP("selectCandidates is skipped, keep candidates", isSSparkLogEnabled)
++      }
++    }
++
++    logInfoSSP(s"Candidates List on Stage $stageId=> $cacheCandidates", isSSparkLogEnabled)
++    logInfoSSP(s"Cache List => $cacheList", isSSparkLogEnabled)
++>>>>>>> LOSIC
++  }
++  
++  // use LinkedHashMap for ordering of lineage
++  val lineages = HashMap[Int, HashMap[Int, LinkedHashMap[Int, LineageInfo]]]() // [ JobId, [ StageId, Lineage ] ]
++<<<<<<< HEAD
++  val rootLineage = HashSet[Int]()  // SSPARK TODO: it doens't need to be HashSet, just a scalar value
++  val rootName = HashSet[String]()
++  
++=======
++  val rootLineage = HashSet[Int]()
++  //val rootName = HashSet[String]()
++  //val rddCheck = HashMap[Int, (Boolean, Boolean)]() // K = rddId, V1 = isCachableHadoopRDD, V2 = isUncachableHadoopRDD
++  val hadoopRDDs = HashSet[Int]()
++  var countFunctional: Int = _
++
++>>>>>>> LOSIC
++  def putLineage(jobId: Int, stageId: Int, value: LinkedHashMap[Int, LineageInfo]): Unit = {
++    lineages.getOrElseUpdate(jobId, HashMap()).put(stageId, value)
++  }
++
++  def getLineage(stageId: Int): LinkedHashMap[Int, LineageInfo] = {
++    lineages.values.flatMap(_.get(stageId)).headOption match {
++      case Some(x) => x
++      case None =>
++        logErrorSSP(s"$stageId lineage does not exist")
++        new LinkedHashMap[Int, LineageInfo]
++    }
++  }
++
++  def checkLineage(lineage: LinkedHashMap[Int, LineageInfo]): Int = { 
++    var countAll = 0
++    lineage.foreach{ x =>
++      if (x._2.deps.contains(-1))
++        countAll += 1
++      if (x._2.deps.contains(-2))
++        countAll += 1
++    }
++    countAll
++  }
++
++  def getRootLineage(lineage: LinkedHashMap[Int, LineageInfo]): Int = {
++    val rootCandidates = lineage.filter(x => x._2.deps.contains(-1) || x._2.deps.contains(-2) || x._2.deps.contains(-3))
++    if (rootCandidates.size > 0) {
++      if ( rootCandidates.size == 1 ) {
++        rootCandidates.head._1
++      }
++      else {
++        rootCandidates.minBy(x => x._1)._1
++      }
++    }
++    else {
++      logErrorSSP("cannot find a root")
++      0
++    }
++  }
++<<<<<<< HEAD
++
++  @deprecated // this is old version of getRootLineage, need to check new version can handle all cases
++  def getRootLineage_depr(lineage: LinkedHashMap[Int, LineageInfo]): Int = {
++    val rootLineage =
++      if (checkLineage(lineage) == 1)   // Job start (-2) or shuffle start (-1)
++        lineage.find(x => x._2.deps.contains(-1) | x._2.deps.contains(-2)).get._1
++      else {
++        // logErrorSSP(s"it has multiple starting nodes $checkLineage")
++        // ALS encounter this case, I'm not sure that this case only can be made from cached case?
++        // Now, if there are multiple root and there isn't no cached intermediate cached RDD, then it occurs runtime error
++        val rootNodes = lineage.filter(x => x._2.deps.contains(-1) || x._2.deps.contains(-2))
++                              .filter(x => x._2.deps.size == 1)
++        if (rootNodes.size == 1) {
++          rootNodes.head._1
++        }
++        else if (lineage.filter(x => x._2.deps.contains(-3)).size == 1){  //for ParallelCollectionRDD
++          lineage.filter(x => x._2.deps.contains(-3)).head._1
++        }
++        else if (lineage.filter(x => x._2.deps.contains(-1)).size > 1) {  //for multiple ShuffledRDD
++          if (lineage.filter(x => x._2.deps.contains(-1)).filter(x => x._2.deps.size == 1).size > 1) {
++            lineage.filter(x => x._2.deps.contains(-1)).filter(x => x._2.deps.size == 1).minBy(x => x._1)._1
++          }
++          else {
++            lineage.filter(x => x._2.deps.contains(-1)).minBy(x => x._1)._1
++          }
++          //update makeLineage wih over stage dependency for ShuffledRDD
++        }
++        else { // I'm not sure that it is exist like this case, brute forcely set 0
++          // ALS cannot find a root, because it's start with ParallelCollectionRDD
++          logErrorSSP("cannot find a root")
++          0
++        }
++      }
++    rootLineage
++  }
++=======
++>>>>>>> LOSIC
++  
++  def getOpName(rdd: RDD[_]): String = {  // maybe don't need anymore
++    val tmpStr = rdd.toString.split(" at ")
++    if (tmpStr.length == 3) {
++      val opName = tmpStr(1).filterNot(_.isWhitespace)
++      val callSite = tmpStr(2).split('[')(0).filterNot(_.isWhitespace)
++      opName + "(" + callSite + ")"
++    }
++    else {
++      logErrorSSP("cannot get OpName")
++      ""
++    }
++  }
++ 
++<<<<<<< HEAD
++=======
++  /* SSPARK: These operations have RDDs in pairs, such as rdd 0 and rdd 1.
++    Usually the first RDD is hadoopRDD, and the second RDD is mapPatitionsRDD.
++    And the first rdd is always unmeasurable in size, so it is combined into one RDD (usually rdd 1).
++  */
++  def isPairHadoopRDD(op: String): Boolean = {
++    if (op == "objectFile" ||
++        op == "sequenceFile" ||
++        op == "textFile") {
++        true
++    }
++    else
++      false
++  }
++
++>>>>>>> LOSIC
++  /**
++   * SSPARK: Make a lineage for each task or job
++   * To adopt an optimization approach, a lineage must be created for each task.
++   */ 
++  def makeLineage(jobId: Int, stageId: Int, rdd: RDD[_]): Unit = {
++    val lineage = new LinkedHashMap[Int, LineageInfo]()
++    def selfInfo(rdd: RDD[_]): Unit = {
++      val len = rdd.dependencies.length
++<<<<<<< HEAD
++      len match{
++=======
++      len match {
++>>>>>>> LOSIC
++        case 0 => 
++          val id = addNode(rdd)
++          if (rdd.toString.startsWith("ParallelCollectionRDD")) lineage.get(id).get.addDeps(-3) 
++          else lineage.get(id).get.addDeps(-2)  // from Job
++        case 1 =>
++          val parentDep = rdd.dependencies.head
++          if (parentDep.isInstanceOf[ShuffleDependency[_, _, _]]) {
++            //logInfoSSP(s"$rdd has parent: -1(Stage)")
++            val id = addNode(rdd)
++            //lineage.get(id).get.addDeps(-1)  // from Stage
++            lineage.get(id).get.addDeps(HashSet(-1, parentID(parentDep))) 
++          }
++          else {
++            //logInfoSSP(s"$rdd has parent: ${parentDep.rdd}")
++            val id = addNode(rdd)
++            lineage.get(id).get.addDeps(parentID(parentDep))
++            selfInfo(parentDep.rdd)
++          }
++        case _ =>
++          //logInfoSSP(s"$rdd has $len parents: ")
++          val id = addNode(rdd)
++          rdd.dependencies.foreach{parentDep => 
++            if (parentDep.isInstanceOf[ShuffleDependency[_, _, _]]) {
++              //logInfoSSP(s"${parentDep.rdd}\t\t -1(Stage)")
++              //lineage.get(id).get.addDeps(-1)
++              lineage.get(id).get.addDeps(HashSet(-1, parentID(parentDep))) 
++            }
++            else {
++              //logInfoSSP(s"\t\t ${parentDep.rdd}")
++              lineage.get(id).get.addDeps(parentID(parentDep))
++              selfInfo(parentDep.rdd)
++            }
++          }
++      }
++    }
++
++<<<<<<< HEAD
++    @deprecated //Dep should be recognized in the previous step, so this method may handle only 1 dep
++    def parentsIDs(parentDep: Seq[Dependency[_]]): HashSet[Int] = {
++      var ids = new HashSet[Int]()
++      parentDep.map{x => 
++        val tmpStr = x.rdd.toString.split(" at ")
++        val id = tmpStr(0).split('[')(1).split(']')(0).toInt
++        ids.add(id)
++      }
++      ids
++    }
++
++=======
++>>>>>>> LOSIC
++    def parentID(parentDep: Dependency[_]): Int = { 
++      val tmpStr = parentDep.rdd.toString.split(" at ")
++      val id = tmpStr(0).split('[')(1).split(']')(0).toInt
++      id
++    }
++
++    def addNode(rdd: RDD[_]): Int = {
++      val id = rdd.id
++      val tmpStr = rdd.newCreationSite.split('(')
++      if (tmpStr.length == 2){
++        val opName = tmpStr(0)
++        val callSite = tmpStr(1).replace(")","")
++        if (!lineage.contains(id)) {
++          lineage.put(id, new LineageInfo(opName, callSite))
++<<<<<<< HEAD
++=======
++
++          val rString = rdd.toString
++          if (rString.startsWith("hdfs://") ||
++              rString.startsWith("HadoopRDD") ||
++              rString.startsWith("NewHadoopRDD") ||
++              rdd.newCreationSite.startsWith("sequenceFile") ) {
++              /* sequenceFile usually has hadoopRDD in the first RDD 
++                 and mapPartitionsRDD in the second RDD, 
++                 but both cannot be cached (and sized) and must be treated as hadoopRDD. */
++            lineage.get(id).get.isHadoopRDD = true
++          }
++>>>>>>> LOSIC
++          //rdd.optimizeCache()  // for making a new decision whether cache it or not, really need this?
++        }
++      }
++      else logErrorSSP(s"Lineage addNode unknwon case ${rdd}")
++      id      
++    }
++
++<<<<<<< HEAD
++    @deprecated   // previous version, without colummn
++    def addNode_depr(rdd: RDD[_]): Int = {
++      var id = -1
++      val tmpStr = rdd.toString.split(" at ")
++      if (tmpStr.length == 3) {
++        id = tmpStr(0).split('[')(1).split(']')(0).toInt
++        val opName = tmpStr(1).filterNot(_.isWhitespace)
++        val callSite = tmpStr(2).split('[')(0).filterNot(_.isWhitespace)
++        if (lineage.contains(id)) None
++        else lineage.put(id, new LineageInfo(opName, callSite))
++      }
++      else logErrorSSP(s"Lineage addNode unknwon case ${rdd}")
++      id
++    }
++
++    //lineage.clear()
++    
++    rootLineage.clear()
++    rootName.clear()
++    selfInfo(rdd)
++    //lineages.put(stageId, lineage)
++    putLineage(jobId, stageId, lineage)
++    rootLineage.add(getRootLineage(lineage))
++    rootName.add(lineage(getRootLineage(lineage)).name)
++    logInfoSSP(s"Lineage was made with root ${rootLineage} $lineage \n ${rdd.toDebugString} \n" +
++=======
++    rootLineage.clear()
++    //rootName.clear()
++    //rddCheck.clear()
++    hadoopRDDs.clear()
++    
++    selfInfo(rdd)
++    /*
++    lineage.foreach{ x => 
++      val rddName = x._2.name
++      rddCheck.put( x._1, (isCachableHadoopRDD(rddName), isUncachableHadoopRDD(rddName)) ) 
++    }*/
++
++    hadoopRDDs ++= lineage.filter(_._2.isHadoopRDD).keys
++    logInfoSSP (s" hadoopRDDs  ${hadoopRDDs}", isSSparkLogEnabled)
++
++    putLineage(jobId, stageId, lineage)
++    rootLineage.add(getRootLineage(lineage))
++    //rootName.add(lineage(getRootLineage(lineage)).name)
++    logInfoSSP(s"Lineage was made with root ${rootLineage} on Stage @$stageId@ Job @$jobId@ @$lineage@ \n ${rdd.toDebugString} \n" +
++>>>>>>> LOSIC
++      s"Job $jobId Stage $stageId cachePlan [$cachePlan] cacheList: $cacheList"
++    , isSSparkLogEnabled)
++  }
++  
++  def checkOptimizeCache(rdd: RDD[_]): Unit = { //, candidatesOnStage: LinkedHashSet[CandidatesInfo]): Unit = {
++    def selfInfo(rdd: RDD[_]): Unit ={
++      val len = rdd.dependencies.length
++      len match{
++        case 0 =>
++          addPlan(rdd)
++        case 1 =>
++          val parentDep = rdd.dependencies.head
++          if (parentDep.isInstanceOf[ShuffleDependency[_, _, _]]) {
++            addPlan(rdd)
++          }
++          else {
++            addPlan(rdd)
++            selfInfo(parentDep.rdd)
++          }
++        case _ =>
++          addPlan(rdd)
++          rdd.dependencies.foreach{parentDep =>
++            if (!parentDep.isInstanceOf[ShuffleDependency[_, _, _]]) {
++              selfInfo(parentDep.rdd)
++            }
++          }
++      }
++    }
++    def addPlan(rdd: RDD[_]): Unit = {
++<<<<<<< HEAD
++      if (candidatesOnStage._1.find(x => x.opId == rdd.newCreationSite).isDefined) {
++        rdd.optimizeCache()
++      }
++      else if (candidatesOnStage._2.find(x => x.opId == rdd.newCreationSite).isDefined)
++      {
++        rdd.unpersist()
++        logInfoSSP(s"unpersist ${rdd.id} at ${rdd.newCreationSite}", isSSparkLogEnabled)
++      }
++=======
++      candidatesOnStage.find(x => x.opId == rdd.newCreationSite && !x.isCached) match {
++        case Some(candidate) =>
++          //candidate.isCached = true
++          logInfoSSP(s"Cache RDD ${rdd.id} at ${rdd.newCreationSite}", isSSparkLogEnabled)
++          rdd.optimizeCache()
++        case None =>
++          // do nothing
++      }
++    }
++    selfInfo(rdd)
++  }
++
++  def checkOptimizeUnpersist(rdd: RDD[_]): Unit = { 
++    def selfInfo(rdd: RDD[_]): Unit ={
++      val len = rdd.dependencies.length
++      len match{
++        case 0 =>
++          addPlan(rdd)
++        case 1 =>
++          val parentDep = rdd.dependencies.head
++          if (parentDep.isInstanceOf[ShuffleDependency[_, _, _]]) {
++            addPlan(rdd)
++          }
++          else {
++            addPlan(rdd)
++            selfInfo(parentDep.rdd)
++          }
++        case _ =>
++          addPlan(rdd)
++          rdd.dependencies.foreach{parentDep =>
++            if (!parentDep.isInstanceOf[ShuffleDependency[_, _, _]]) {
++              selfInfo(parentDep.rdd)
++            }
++          }
++      }
++    }
++    
++    def addPlan(rdd: RDD[_]): Unit = {
++      cacheCandidates.filter(x => x.isCached && x.counts == 0).find(_.opId == rdd.newCreationSite) match {
++        case Some(candidate) =>
++          rdd.unpersist()
++          candidate.isCached = false
++          logInfoSSP(s"unpersist RDD ${rdd.id} at ${rdd.newCreationSite}", isSSparkLogEnabled)
++        case None =>
++          // Do nothing
++      }
++      /* old version
++      if (candidatesOnStage._2.find(x => x.opId == rdd.newCreationSite).isDefined) {
++        rdd.unpersist()
++        candidatesOnStage._2.find(x => x.opId == rdd.newCreationSite).get.isCached = false
++        //candidatesOnStage._2.remove(candidatesOnStage._2.find(x => x.opId == rdd.newCreationSite).get)
++        logInfoSSP(s"unpersist RDD ${rdd.id} at ${rdd.newCreationSite}", isSSparkLogEnabled)
++      }
++      */
++>>>>>>> LOSIC
++    }
++    selfInfo(rdd)
++  }
++
++<<<<<<< HEAD
++  /*
++  private[spark] var newAppName: String = _
++
++  def setNewAppName(rdd: RDD[_]): Unit = {
++    val tmpStr = rdd.toString.split(" at ")
++    if (tmpStr.length == 3) {
++      newAppName = tmpStr(2).split('.')(0).filterNot(_.isWhitespace)
++    }
++    else {
++      logErrorSSP("SSparkOptimize set disabled because it's not able to recognize appname")
++      isSSparkOptimizeEnabled = false
++    }
++  }*/
++=======
++  var profiledCount = 0
++  var computedCount = 0
++  val profileRDDs = HashSet[Int]()
++
++  def makeProfilePlanner(lineage: LinkedHashMap[Int, LineageInfo], rootLineage: Int, stageInputBytes: Long)
++                          : Unit = {
++    profileRDDs.clear()
++    val profilePlanner = HashSet[Int]()
++    val visited = HashSet[Int]()
++    
++    def self(node: Int, depth: Int, inputSize: Double): Unit = {  // Top-Down
++      val opId = lineage(node).name + "(" + lineage(node).callSite + ")"
++      val deps = lineage(node).deps
++      val children = lineage.filter(_._2.deps.contains(node))
++
++      val sameOp: Boolean =
++        deps.exists { id =>
++          lineage.get(id).exists { v =>
++            opId == s"${v.name}(${v.callSite})"
++          }
++        }
++      visited.add(node)
++
++      if (!sameOp) {
++        var (opName, readedSize) = readProfiling(opId, "size")
++
++        if (functionalOps.contains(opName)) {
++          readedSize = readedSize.filter(_._1 == opId)
++        }
++        
++        val exists = readedSize.exists { case (_, second, _) =>
++          val percentError = 1 - Math.pow(profileThreshold, depth)
++          math.abs(second - inputSize) <= inputSize * percentError
++        }
++
++        if (!exists) {
++          profilePlanner.add(node)
++        }
++        
++        val predSize = getValueFromRegression(readedSize, opName, inputSize, "size")
++
++        children.foreach { x => 
++          if (!visited.contains(x._1)) {
++            self(x._1, depth+1, predSize)
++          }
++        }
++      }
++      else {  //if there is same operation parents then it should be profiled, already in profilePlanner
++        if (deps.exists(profilePlanner.contains)) {
++          profilePlanner.add(node)
++        }
++        children.foreach { x =>
++          if (!visited.contains(x._1)) {
++            self(x._1, depth, inputSize)  // same depth and inputSize, because it should be into same operation.
++          }
++        }
++      }
++    }
++
++    val startInputSize: Double = stageInputBytes.toFloat / Math.pow(2,20)
++    self(rootLineage, 0, startInputSize)
++    
++    // need to add parents to know input size.
++    val current = profilePlanner.toSet
++    for (node <- current) {
++      lineage.get(node).foreach { info =>
++        profilePlanner ++= info.deps.filter(_ >= 0)
++      }
++    }
++    
++    profileRDDs ++= profilePlanner
++    
++    logInfoSSP(s"profilePlanner has been made -> ${profileRDDs}", isSSparkLogEnabled)
++    /*
++    val iProfilePlanner: scala.collection.immutable.HashSet[Int] =
++            scala.collection.immutable.HashSet.empty ++ profilePlanner
++    iProfilePlanner
++    */
++  }
++>>>>>>> LOSIC
++
++  def getFileNameFromRootRDD(rdg: HashMap[Int, LineageInfo]): String = {
++    rdg.get(rdg.minBy(_._1)._1).get.callSite.split('(')(0).split('.')(0) + ".rdg"
++  }
++
++  def makeRDG(lineages: HashMap[Int, HashMap[Int, LinkedHashMap[Int, LineageInfo]]]): HashMap[Int, LineageInfo] = {
++    val rdg = HashMap[Int, LineageInfo]()
++
++    def findChildren(rdd: Int): HashSet[Int] = {
++      val children = HashSet[Int]()
++      lineages.foreach { jobLineage =>
++        jobLineage._2.foreach { stageLineage =>
++          val nodeInfo = stageLineage._2.filter(x => x._2.deps.contains(rdd))
++          nodeInfo.foreach(x => children.add(x._1))
++        }
++      }
++      children
++    }
++
++    def addNode(rdd: Int): Unit = {
++      val node = lineages.values.flatMap(_.values).find(_.contains(rdd)).get.find(_._1 == rdd).get
++      rdg.put(rdd, new LineageInfo(node._2.name, node._2.callSite))
++      val children = findChildren(rdd)
++      rdg.get(rdd).get.addDeps(children)
++    }
++
++    def selfInfo(rdd: Int): Unit = {
++      if (!rdg.contains(rdd)) {
++        addNode(rdd)
++        findChildren(rdd).map(x => selfInfo(x))
++      }
++    }
++
++<<<<<<< HEAD
++    def findParent(rdd: Int): HashSet[Int] = {
++      val parent = HashSet[Int]()
++      rdg.filter(x => x._2.deps.contains(rdd)).map(x => parent.add(x._1))
++      parent
++    }
++
++    def countActions(rdd: Int): Unit = {
++      rdg.get(rdd).get.count = rdg.get(rdd).get.count+1
++      findParent(rdd).map(countActions(_))
++    }
++
++=======
++>>>>>>> LOSIC
++    def addActionLineages(): Unit = {
++      val maxRdd = lineages.values.flatMap(_.values).flatMap(_.keys).max + 1
++
++      for (jobId <- 0 to lineages.size - 1) {
++        val lastStage = lineages(jobId).maxBy(_._1)._1
++        val lineage = getLineage(lastStage)
++        val lastNode = lineage.head._1
++        lineage.put(maxRdd + jobId, new LineageInfo("Action", s"Job$jobId"))
++        lineage.get(maxRdd + jobId).get.addDeps(lastNode)
++      }
++    }
++<<<<<<< HEAD
++    
++    addActionLineages()
++    val root = lineages.minBy(_._1)._2.minBy(_._1)._2.minBy(_._1)._1 // normally it should be 0
++    selfInfo(root)
++    val leafNodes = HashSet[Int]()
++    rdg.filter(_._2.deps.size == 0).foreach(x => leafNodes.add(x._1))
++
++    leafNodes.map(countActions(_))
++=======
++
++    def countNodes(): Unit = {
++      rdg.foreach { x =>
++        val count = lineages.values
++          .flatMap(_.values)
++          .flatMap(_.keys)
++          .count(_ == x._1)
++        rdg.get(x._1).get.count = count
++      }
++    }
++
++    addActionLineages()
++    val root = lineages.minBy(_._1)._2.minBy(_._1)._2.minBy(_._1)._1 // normally it should be 0
++    selfInfo(root)
++    countNodes()
++
++>>>>>>> LOSIC
++    rdg
++  }
++
++  def writeRDG(rdg: HashMap[Int, LineageInfo]): Unit = {
++    val filePath = Paths.get(rdgDir) + "/" + newAppName + ".rdg"//getFileNameFromRootRDD(rdg)
++    val fw = new FileWriter(filePath)
++
++    rdg.foreach(x => fw.write(s"${x._1}; ${x._2.name}; ${x._2.callSite}; ${x._2.deps}; ${x._2.count}\n"))
++
++    fw.close()
++  }
++
++  def readRDG(): HashMap[Int, LineageInfo] = {
++    val rdg = HashMap[Int, LineageInfo]()
++    val filePath = Paths.get(rdgDir) + "/" + newAppName + ".rdg"
++    if (existsRDG(newAppName)) {
++      val fileReader = Source.fromFile(filePath)
++      def toDepsSet(deps: String): HashSet[Int] = {
++        val depsStr = deps.replace("Set(","")
++                          .replace(")","")
++                          .replace(" ","")
++        val depsSet = HashSet[Int]()
++        depsStr.split(',').map(x => depsSet.add(x.toInt))
++        depsSet
++      }
++      for (line <- fileReader.getLines()) {
++        val tmpLine = line.split(';')
++        val rddId: Int = tmpLine(0).filterNot(_.isWhitespace).toInt
++        val opName: String = tmpLine(1).filterNot(_.isWhitespace)
++        val callSite: String = tmpLine(2).filterNot(_.isWhitespace)
++        val deps: HashSet[Int] = {
++          val depsTmp = tmpLine(3).filterNot(_.isWhitespace)
++          if (depsTmp == "Set()")
++            HashSet[Int]()
++          else
++            toDepsSet(depsTmp)
++        }
++        val count: Int = tmpLine(4).filterNot(_.isWhitespace).toInt
++        rdg.put(rddId, {val info = new LineageInfo(opName, callSite)
++          info.addDeps(deps)
++          info.count = count
++          info})
++      }
++      fileReader.close()
++    }
++<<<<<<< HEAD
++    else {
++      logErrorSSP("Cannot read RDG, SSparkOptimize set disabled")
++      isSSparkOptimizeEnabled = false
++=======
++    else {     
++      isSSparkOptimizeEnabled = false
++      setOptimizeEnabled(isSSparkOptimizeEnabled)
++      //lastOptimizeFlag = false
++
++      logWarningSSP(s"Cannot read RDG, SSparkOptimize is disabled.")
++>>>>>>> LOSIC
++    }
++    rdg
++  }
++  
++  def existsRDG(appName: String): Boolean = {   //appName -> without .scala:#line.... e.g., "SVMWithSGDExample"
++<<<<<<< HEAD
++    //val filePath = Paths.get(rdgDir + "/" + appName.split('.')(0) + ".rdg")
++=======
++>>>>>>> LOSIC
++    val filePath = Paths.get(rdgDir + "/" + appName + ".rdg")
++    if (Files.exists(filePath)) true
++    else false
++  }
++
++<<<<<<< HEAD
++=======
++  var minRemainingStorageMem = Long.MaxValue
++>>>>>>> LOSIC
++  def getRemainingStorageMem(): Long = {
++    val storageStatus = SparkEnv.get.blockManager.master.getStorageStatus
++    if (isSSparkLogEnabled) {
++      storageStatus.foreach { status =>
++         logInfoSSP(s"Executor ID: ${status.blockManagerId.executorId}, " +
++         s"Max Memory: ${status.maxMem}, Remaining Memory: ${status.memRemaining}")
++      }
++    }
++<<<<<<< HEAD
++    storageStatus.filter(_.blockManagerId.executorId != "driver").map(_.memRemaining).sum
++  }
++
++  /*
++  def profilingTrim(dirPath: String): Unit = {
++    val dir = new File(dirPath)
++    val profilingFiles = dir.listFiles.filter(file => file.isFile && file.getName.endsWith(".csv"))
++
++    profilingFiles.foreach { file =>
++      val lines = Source.fromFile(file).getLines().toList
++      if (lines.length > maxProfiling) {
++        val trimmedLines = lines.takeRight(maxProfiling)
++        val writer = new PrintWriter(file)
++        trimmedLines.foreach(writer.println)
++        writer.close()
++      }
++    }
++  }*/
++
++=======
++    val remainingMem = storageStatus.filter(_.blockManagerId.executorId != "driver").map(_.memRemaining).sum
++    if (isSSparkMemCheck && minRemainingStorageMem > remainingMem && remainingMem != 0) 
++      minRemainingStorageMem = remainingMem
++    remainingMem
++  }
++
++>>>>>>> LOSIC
++  def profilingTrim(dirPath: String): Unit = {
++    val dir = new File(dirPath)
++    val profilingFiles = dir.listFiles.filter(file => file.isFile && file.getName.endsWith(".csv"))
++
++    profilingFiles.foreach { file =>
++      val lines = Source.fromFile(file).getLines().toList
++
++      // Parse lines into structured data
++      val parsedData = lines.map { line =>
++        val parts = line.split(",").map(_.trim)
++        (parts(0), parts(1).toDouble, parts(2).toDouble)
++      }
++
++      // Group by the first two elements and calculate the average of the third element
++      val aggregatedData = parsedData
++        .groupBy { case (key1, key2, _) => (key1, key2) }
++        .map { case ((key1, key2), group) =>
++          val avgThird = group.map(_._3).sum / group.size
++          (key1, key2, avgThird)
++        }
++        .toList
++
++<<<<<<< HEAD
++      // Limit the number of lines to maxProfiling if necessary
++      val trimmedData = if (aggregatedData.size > maxProfiling) {
++        aggregatedData.takeRight(maxProfiling)
++=======
++      // Limit the number of lines to maxProfile if necessary
++      val trimmedData = if (aggregatedData.size > maxProfile) {
++        aggregatedData.takeRight(maxProfile)
++>>>>>>> LOSIC
++      } else {
++        aggregatedData
++      }
++
++      // Write back to the file
++      val writer = new PrintWriter(file)
++      try {
++        trimmedData.foreach { case (key1, key2, avgThird) =>
++          writer.println(s"$key1, $key2, $avgThird")
++        }
++      } finally {
++        writer.close()
++      }
++    }
++  }
++
+   /**
+    * Run a function on a given set of partitions in an RDD and pass the results to the given
+    * handler function. This is the main entry point for all actions in Spark.
+@@ -2054,6 +4220,7 @@ class SparkContext(config: SparkConf) extends Logging {
+     }
+     val callSite = getCallSite
+     val cleanedFunc = clean(func)
++    accumScope.clear()  // SSPARK
+     logInfo("Starting job: " + callSite.shortForm)
+     if (conf.getBoolean("spark.logLineage", false)) {
+       logInfo("RDD's recursive dependencies:\n" + rdd.toDebugString)
+@@ -2440,6 +4607,7 @@ class SparkContext(config: SparkConf) extends Logging {
+  * various Spark features.
+  */
+ object SparkContext extends Logging {
++
+   private val VALID_LOG_LEVELS =
+     Set("ALL", "DEBUG", "ERROR", "FATAL", "INFO", "OFF", "TRACE", "WARN")
+ 
+diff --git a/core/src/main/scala/org/apache/spark/executor/Executor.scala b/core/src/main/scala/org/apache/spark/executor/Executor.scala
+index f7ff0b8..dc8a5cc 100644
+--- a/core/src/main/scala/org/apache/spark/executor/Executor.scala
++++ b/core/src/main/scala/org/apache/spark/executor/Executor.scala
+@@ -27,7 +27,7 @@ import java.util.concurrent._
+ import javax.annotation.concurrent.GuardedBy
+ 
+ import scala.collection.JavaConverters._
+-import scala.collection.mutable.{ArrayBuffer, HashMap, Map}
++import scala.collection.mutable.{ArrayBuffer, HashMap, Map, HashSet}
+ import scala.concurrent.duration._
+ import scala.util.control.NonFatal
+ 
+@@ -72,6 +72,14 @@ private[spark] class Executor(
+ 
+   private val conf = env.conf
+ 
++<<<<<<< HEAD
++  private val isSSparkProfileEnabled = conf.getBoolean("spark.ssparkProfile.enabled", false)
++  private val isSSparkLogEnabled = conf.getBoolean("spark.ssparkLog.enabled", false)
++=======
++  private val isSSparkProfileEnabled = conf.getBoolean("spark.ss.profile.enabled", false)
++  private val isSSparkLogEnabled = conf.getBoolean("spark.ss.log.enabled", false)
++>>>>>>> LOSIC
++
+   // No ip or host:port - just hostname
+   Utils.checkHost(executorHostname)
+   // must not have port specified.
+@@ -510,6 +518,50 @@ private[spark] class Executor(
+         executorSource.METRIC_DISK_BYTES_SPILLED.inc(task.metrics.diskBytesSpilled)
+         executorSource.METRIC_MEMORY_BYTES_SPILLED.inc(task.metrics.memoryBytesSpilled)
+ 
++        // SSPARK: calc block computing time per each task
++<<<<<<< HEAD
++        if(isSSparkProfileEnabled){
++          val blockTime = task.metrics.calcBlockTime(isSSparkLogEnabled, taskId) 
++            // probably need to modify to previous version without infos for debuging
++=======
++        @inline def profilingBlock(): Unit = {
++          val blockTime = task.metrics.calcBlockTime(isSSparkLogEnabled, taskId) 
++            // probably need to modify to previous version without infos for debugging
++>>>>>>> LOSIC
++            // val blockTime = task.metrics.calcBlockTime() 
++          val updatedBlockTime = task.metrics.toJavaList(blockTime)
++          val blockSize = task.metrics.blockSize
++          val updatedBlockSize = task.metrics.toJavaList(blockSize)
++          logInfoSSP(s"Time ${updatedBlockTime}", isSSparkLogEnabled)
++<<<<<<< HEAD
++          logInfoSSP(s"Size ${updatedBlockSize}", isSSparkLogEnabled)
++=======
++          logInfoSSP(s"Size ${updatedBlockSize}", isSSparkLogEnabled)  
++>>>>>>> LOSIC
++          task.metrics.setUpdatedBlockTime(updatedBlockTime)
++          task.metrics.setUpdatedBlockSize(updatedBlockSize)
++        }
++
++<<<<<<< HEAD
++=======
++        if (isSSparkProfileEnabled){
++          if (isSSparkLogEnabled) {
++            val startProfilingTime = System.currentTimeMillis()
++            profilingBlock()
++            val endProfilingTime = System.currentTimeMillis()
++            logInfoSSP(s"Spend time for profiling: ${endProfilingTime - startProfilingTime}", isSSparkLogEnabled)
++          }
++          else {
++            profilingBlock()
++          }
++          
++          val computedRdds = task.metrics.computedRdds
++          val updatedComputedRdds = task.metrics.toJavaList(computedRdds)
++          task.metrics.setUpdatedComputedRdds(updatedComputedRdds)
++
++        }
++
++>>>>>>> LOSIC
+         // Note: accumulator updates must be collected after TaskMetrics is updated
+         val accumUpdates = task.collectAccumulatorUpdates()
+         // TODO: do not serialize value twice
+diff --git a/core/src/main/scala/org/apache/spark/executor/TaskMetrics.scala b/core/src/main/scala/org/apache/spark/executor/TaskMetrics.scala
+index 85b2745..603b6a4 100644
+--- a/core/src/main/scala/org/apache/spark/executor/TaskMetrics.scala
++++ b/core/src/main/scala/org/apache/spark/executor/TaskMetrics.scala
+@@ -18,7 +18,11 @@
+ package org.apache.spark.executor
+ 
+ import scala.collection.JavaConverters._
+-import scala.collection.mutable.{ArrayBuffer, LinkedHashMap}
++<<<<<<< HEAD
++import scala.collection.mutable.{ArrayBuffer, LinkedHashMap, LinkedHashSet, HashMap}
++=======
++import scala.collection.mutable.{ArrayBuffer, LinkedHashMap, LinkedHashSet, HashMap, HashSet}
++>>>>>>> LOSIC
+ 
+ import org.apache.spark._
+ import org.apache.spark.annotation.DeveloperApi
+@@ -42,7 +46,7 @@ import org.apache.spark.util._
+  * be sent to the driver.
+  */
+ @DeveloperApi
+-class TaskMetrics private[spark] () extends Serializable {
++class TaskMetrics private[spark] () extends Serializable with Logging {
+   // Each metric is internally represented as an accumulator
+   private val _executorDeserializeTime = new LongAccumulator
+   private val _executorDeserializeCpuTime = new LongAccumulator
+@@ -55,6 +59,136 @@ class TaskMetrics private[spark] () extends Serializable {
+   private val _diskBytesSpilled = new LongAccumulator
+   private val _peakExecutionMemory = new LongAccumulator
+   private val _updatedBlockStatuses = new CollectionAccumulator[(BlockId, BlockStatus)]
++  
++  // SSPARK part
++  private val _updatedBlockTime = new CollectionAccumulator[(Int, Long)]
++  private val _updatedBlockSize = new CollectionAccumulator[(Int, Long)]
++  
++  private[spark] def toJavaList(v: LinkedHashMap[Int, Long]): java.util.List[(Int, Long)] = {
++    v.toList.asJava
++  }
++  
++  def updatedBlockTime: Seq[(Int, Long)] = {
++    _updatedBlockTime.value.asScala
++  }
++<<<<<<< HEAD
++  def updatedBlockSize: Seq[(Int, Long)] = {
++    _updatedBlockSize.value.asScala
++  }
++  
++=======
++  
++  def updatedBlockSize: Seq[(Int, Long)] = {
++    _updatedBlockSize.value.asScala
++  }
++
++  // for profiling ratio
++  private[spark] def toJavaList(v: HashSet[Int]): java.util.List[Int] = {
++    v.toList.asJava
++  }
++
++  private val _updatedComputedRdds = new CollectionAccumulator[Int]  
++
++  def updatedComputedRdds: Seq[Int] = { 
++    _updatedComputedRdds.value.asScala
++  }
++
++  private[spark] def setUpdatedComputedRdds(v: java.util.List[Int]): Unit =
++    _updatedComputedRdds.setValue(v)
++
++  private val _computedRdds = new HashSet[Int]
++
++  def computedRdds: HashSet[Int] = _computedRdds
++
++
++>>>>>>> LOSIC
++  private[spark] def setUpdatedBlockTime(v: java.util.List[(Int, Long)]): Unit =
++    _updatedBlockTime.setValue(v)
++  private[spark] def setUpdatedBlockSize(v: java.util.List[(Int, Long)]): Unit =
++    _updatedBlockSize.setValue(v)
++<<<<<<< HEAD
++ 
++=======
++  
++>>>>>>> LOSIC
++  /* SSPARK: get BlockInfos from RDD iterator
++   *  blockTime use LinkedHashSet for guarantee the sequence of time stamps
++   *  As a result, it can get actual block computing time on Executor.run 
++   */
++  class BlockInfos(val _time: Long, 
++                   val _isStart: Boolean,
++                   val _rddId: Int, 
++                   val _partitionId: Int, 
++                   val _isCached: Boolean,
++                   val _root: Int                   
++                   ) {
++    val time = _time
++    val isStart = _isStart
++    val rddId = _rddId
++    val partitionId = _partitionId
++    val isCached = _isCached
++    val root = _root
++
++    override def toString(): String = {
++      s"rdd[p]:${rddId}[${partitionId}] root:${root} isStart:${isStart} isCached:${isCached} time:${time}"
++    }
++  }
++
++  private val _blockTime = new LinkedHashSet[BlockInfos]
++  private val _blockSize = new LinkedHashMap[Int, Long] // it should keep the ordering to devide into input/output size
++  
++  def blockTime: LinkedHashSet[BlockInfos] = _blockTime
++  def blockSize: LinkedHashMap[Int, Long]  = _blockSize
++
++  
++
++  private [spark] def setBlockTime(_time: Long, 
++                   _isStart: Boolean,
++                   _rddId: Int, 
++                   _partitionId: Int, 
++                   _isCached: Boolean,
++                   _root: Int
++                   ): Unit =
++    _blockTime.add(new BlockInfos(_time, _isStart, _rddId, _partitionId, _isCached, _root))
++  
++  private [spark] def setBlockTime(infos: BlockInfos): Unit = 
++    _blockTime.add(infos)
++
++  private [spark] def setBlockSize(_rddId: Int, _size: Long): Unit =
++    _blockSize.put(_rddId, _size)
++   
++  def calcBlockTime(isSSparkLogEnabled: Boolean, taskId: Long): LinkedHashMap[Int, Long] ={
++    val calc = new LinkedHashMap[Int, Long]
++    var startTime = 0L
++    var endTime = 0L
++    blockTime.foreach{ x =>
++      if (x.isStart) {
++        startTime = x.time  // doesn't need to distinguish root, just overwrite a startTime for finding last attached node
++        /*
++        if (x.rddId == x.root)  // no cached, run from the root of lineage
++          startTime = x.time
++        else  // scheduled start block but it's not actually executed because of lazy execution
++          None
++          */
++      }
++      else { //isEnd
++        if (x.isCached)
++          startTime = x.time
++        else {
++          endTime = x.time
++          if (endTime == 0L || startTime == 0L)
++            logErrorSSP(s"Time got 0 for rdd ${x.rddId} with root ${x.root}, ST=${startTime}, ET=${endTime}")
++          else {
++            logInfoSSP(s"Task ${taskId} rdd ${x.rddId} from ${startTime} to ${endTime}", isSSparkLogEnabled)
++            calc.put(x.rddId, endTime - startTime)
++          }
++          startTime = x.time
++        }
++      }
++    }
++    calc
++  }
++  // END SSPARK
+ 
+   /**
+    * Time taken on the executor to deserialize this task.
+@@ -218,6 +352,14 @@ class TaskMetrics private[spark] () extends Serializable {
+     DISK_BYTES_SPILLED -> _diskBytesSpilled,
+     PEAK_EXECUTION_MEMORY -> _peakExecutionMemory,
+     UPDATED_BLOCK_STATUSES -> _updatedBlockStatuses,
++<<<<<<< HEAD
++    BLOCK_TIME -> _updatedBlockTime,    //SSPARK
++    BLOCK_SIZE -> _updatedBlockSize,    //SSPARK
++=======
++    BLOCK_TIME -> _updatedBlockTime,       //SSPARK
++    BLOCK_SIZE -> _updatedBlockSize,       //SSPARK
++    COMPUTED_RDDS -> _updatedComputedRdds, //SSPARK
++>>>>>>> LOSIC
+     shuffleRead.REMOTE_BLOCKS_FETCHED -> shuffleReadMetrics._remoteBlocksFetched,
+     shuffleRead.LOCAL_BLOCKS_FETCHED -> shuffleReadMetrics._localBlocksFetched,
+     shuffleRead.REMOTE_BYTES_READ -> shuffleReadMetrics._remoteBytesRead,
+@@ -298,7 +440,22 @@ private[spark] object TaskMetrics extends Logging {
+       val value = info.update.get
+       if (name == UPDATED_BLOCK_STATUSES) {
+         tm.setUpdatedBlockStatuses(value.asInstanceOf[java.util.List[(BlockId, BlockStatus)]])
+-      } else {
++      } 
++      /*
++      else if (name == BLOCK_TIME){
++        tm.setUpdatedBlockTime(value.asInstanceOf[java.util.List[(Int, Long)]])
++      }
++      else if (name == BLOCK_SIZE){
++        tm.setUpdatedBlockSize(value.asInstanceOf[java.util.List[(Int, Long)]])
++      }*/
++<<<<<<< HEAD
++      else if (name == BLOCK_TIME || name == BLOCK_SIZE) {
++=======
++      else if (name == BLOCK_TIME || name == BLOCK_SIZE || name == COMPUTED_RDDS) {
++>>>>>>> LOSIC
++        None
++      }
++      else {
+         tm.nameToAccums.get(name).foreach(
+           _.asInstanceOf[LongAccumulator].setValue(value.asInstanceOf[Long])
+         )
+diff --git a/core/src/main/scala/org/apache/spark/internal/Logging.scala b/core/src/main/scala/org/apache/spark/internal/Logging.scala
+index c0d709a..64271d1 100644
+--- a/core/src/main/scala/org/apache/spark/internal/Logging.scala
++++ b/core/src/main/scala/org/apache/spark/internal/Logging.scala
+@@ -20,6 +20,7 @@ package org.apache.spark.internal
+ import org.apache.log4j.{Level, LogManager, PropertyConfigurator}
+ import org.slf4j.{Logger, LoggerFactory}
+ import org.slf4j.impl.StaticLoggerBinder
++import org.apache.spark.SparkContext
+ 
+ import org.apache.spark.util.Utils
+ 
+@@ -69,6 +70,38 @@ trait Logging {
+   protected def logError(msg: => String) {
+     if (log.isErrorEnabled) log.error(msg)
+   }
++  
++  /**
++   * SSPARK part: Additional log methods
++   * Now we need to change the Enabled value explicitly
++   * If there are too many logs, performance will deteriorate, 
++   * so set the flag to false in the performance experiment.
++   */ 
++  
++  protected def logInfoSSP(msg: => String) {
++    if (log.isInfoEnabled) log.info("SSPARK: "+msg)
++  }
++
++  protected def logInfoSSP(msg: => String, isSSparkLogEnabled: Boolean) {
++    if (log.isInfoEnabled && isSSparkLogEnabled) log.info("SSPARK: "+msg)
++  }
++
++  protected def logWarningSSP(msg: => String) {
++    if (log.isWarnEnabled) log.warn("SSPARK: "+msg)
++  }
++
++  protected def logWarningSSP(msg: => String, isSSparkLogEnabled: Boolean) {
++    if (log.isWarnEnabled && isSSparkLogEnabled) log.warn("SSPARK: "+msg)
++  }
++
++  protected def logErrorSSP(msg: => String) {
++    if (log.isErrorEnabled) log.error("SSPARK: "+msg)
++  }
++
++  protected def logErrorSSP(msg: => String, isSSparkLogEnabled: Boolean) {
++    if (log.isErrorEnabled && isSSparkLogEnabled) log.error("SSPARK: "+msg)
++  }
++  //SSPARK END
+ 
+   // Log methods that take Throwables (Exceptions/Errors) too
+   protected def logInfo(msg: => String, throwable: Throwable) {
+diff --git a/core/src/main/scala/org/apache/spark/rdd/RDD.scala b/core/src/main/scala/org/apache/spark/rdd/RDD.scala
+index 31c6bc1..00c6900 100644
+--- a/core/src/main/scala/org/apache/spark/rdd/RDD.scala
++++ b/core/src/main/scala/org/apache/spark/rdd/RDD.scala
+@@ -40,8 +40,8 @@ import org.apache.spark.partial.BoundedDouble
+ import org.apache.spark.partial.CountEvaluator
+ import org.apache.spark.partial.GroupedCountEvaluator
+ import org.apache.spark.partial.PartialResult
+-import org.apache.spark.storage.{RDDBlockId, StorageLevel}
+-import org.apache.spark.util.{BoundedPriorityQueue, Utils}
++import org.apache.spark.storage.{RDDBlockId, StorageLevel, RDDInfo}
++import org.apache.spark.util.{BoundedPriorityQueue, Utils, SizeEstimator}
+ import org.apache.spark.util.collection.{OpenHashMap, Utils => collectionUtils}
+ import org.apache.spark.util.random.{BernoulliCellSampler, BernoulliSampler, PoissonSampler,
+   SamplingUtils}
+@@ -158,13 +158,56 @@ abstract class RDD[T: ClassTag](
+     this
+   }
+ 
++  private def persist(newLevel: StorageLevel, allowOverride: Boolean): this.type = {
++    //val remainingMem = sc.getRemainingStorageMem()
++    //logInfoSSP(s"MEM: $remainingMem", isSSparkLogEnabled)
++<<<<<<< HEAD
++    if(isSSparkOptimizeEnabled) {
++      //if (!sc.cacheCandidates.filter(x => x.opId == newCreationSite).isEmpty) { //need to change cacheCandidates to cacheList
++      if (sc.cacheList.contains(newCreationSite)) { 
++=======
++    
++    
++    var _allowOverride = allowOverride
++    if (sizeProfileMode == "cache")
++      _allowOverride = true
++    
++		/* doesn't work here move to persist(newLevel: StorageLevel)
++    if (noCache) {
++      logInfoSSP(s"rdd ${this.id} was called persist() but remove from cache list via noCache option", isSSparkLogEnabled)
++      this
++    }
++		*/
++
++    if (isSSparkOptimizeEnabled) {
++      //if (!sc.cacheCandidates.filter(x => x.opId == newCreationSite).isEmpty) { //need to change cacheCandidates to cacheList
++      if (sc.cacheList.contains(newCreationSite)) { 
++        sc.cacheCandidates.find(_.opId == newCreationSite).get.isCached = true
++>>>>>>> LOSIC
++        persistImpl(newLevel, true)
++      }
++      else {
++        logInfoSSP(s"rdd ${this.id} was called persist() but remove from cache list via optimizeCache()", isSSparkLogEnabled)
++        this
++      }
++    }
++    else { 
++<<<<<<< HEAD
++     persistImpl(newLevel, allowOverride)
++=======
++      persistImpl(newLevel, _allowOverride)
++>>>>>>> LOSIC
++    }
++    //this
++  }
++
+   /**
+    * Mark this RDD for persisting using the specified level.
+    *
+    * @param newLevel the target storage level
+    * @param allowOverride whether to override any existing level with the new one
+    */
+-  private def persist(newLevel: StorageLevel, allowOverride: Boolean): this.type = {
++  private def persistImpl(newLevel: StorageLevel, allowOverride: Boolean): this.type = {
+     // TODO: Handle changes of StorageLevel
+     if (storageLevel != StorageLevel.NONE && newLevel != storageLevel && !allowOverride) {
+       throw new UnsupportedOperationException(
+@@ -186,6 +229,7 @@ abstract class RDD[T: ClassTag](
+    * have a storage level set yet. Local checkpointing is an exception.
+    */
+   def persist(newLevel: StorageLevel): this.type = {
++<<<<<<< HEAD
+     if (isLocallyCheckpointed) {
+       // This means the user previously called localCheckpoint(), which should have already
+       // marked this RDD for persisting. Here we should override the old storage level with
+@@ -194,6 +238,22 @@ abstract class RDD[T: ClassTag](
+     } else {
+       persist(newLevel, allowOverride = false)
+     }
++=======
++		if (noCache) {
++      logInfoSSP(s"rdd ${this.id} was called persist() but remove from cache list via noCache option", isSSparkLogEnabled)
++			this
++		}
++		else {
++	    if (isLocallyCheckpointed) {
++  	    // This means the user previously called localCheckpoint(), which should have already
++    	  // marked this RDD for persisting. Here we should override the old storage level with
++      	// one that is explicitly requested by the user (after adapting it to use disk).
++	      persist(LocalRDDCheckpointData.transformStorageLevel(newLevel), allowOverride = true)
++  	  } else {
++    	  persist(newLevel, allowOverride = false)
++	    }
++		}
++>>>>>>> LOSIC
+   }
+ 
+   /**
+@@ -298,12 +358,366 @@ abstract class RDD[T: ClassTag](
+     }
+   }
+ 
++<<<<<<< HEAD
++  /**
++   * SSPARK: The method to make a short form of lineage for printing
++   */
++  def shortformLineage(lineage: mutable.LinkedHashMap[Int,String]): String ={
++    var shortform = ""
++    lineage.foreach(x => shortform += x._1 + "  ")
++    shortform
++  }
++
++  
++=======
++  var stageId = 0
++
++  def setStageId(_stageId: Int): Unit = {
++    stageId = _stageId
++  }
++>>>>>>> LOSIC
++
++  var isCachedBlock = false  /** SSPARK: variable for checking really cached block of RDD, 
++              it's not possible to check whether it's cached or not with original Spark's variable/value  */
++  val rootLineage = sc.rootLineage
++<<<<<<< HEAD
++  val rootName = sc.rootName
++     
++  private val isSSparkOptimizeEnabled = conf.getBoolean("spark.ssparkOptimize.enabled", false)
++  private val isSSparkProfileEnabled = conf.getBoolean("spark.ssparkProfile.enabled", false)
++  private val isSSparkLogEnabled = conf.getBoolean("spark.ssparkLog.enabled", false)
++
++=======
++  //val rddCheck = sc.rddCheck  // K = rddId, V1 = isHadoopRDD, V2 = uncachableRDD
++  val hadoopRDDs = sc.hadoopRDDs
++  def isHadoopRDD: Boolean = {
++    hadoopRDDs.contains(this.id)
++  }
++  val profileRDDs = sc.profileRDDs
++  def skipSizeProfile: Boolean = {
++    !profileRDDs.contains(this.id)
++  }
++  def skipTimeProfile: Boolean = {
++    profileRDDs.isEmpty
++  }
++
++  val mutableConf = sc.mutableConf
++  def isSSparkOptimizeEnabled: Boolean = {
++    mutableConf.get("optimize") match {
++      case Some(x) => x
++      case _ => false
++    }
++  }
++
++  /*
++  private val isSSparkOptimizeEnabled = conf.getBoolean("spark.ss.optimize.enabled", false)
++  private val isSSparkProfileEnabled = conf.getBoolean("spark.ss.profile.enabled", false)
++  private val isSSparkLogEnabled = conf.getBoolean("spark.ss.log.enabled", false)
++  private val sizeProfileMode = conf.getOption("spark.ss.profile.mode")
++                                    .getOrElse("toArray") // toArray, cache, sampling
++  private val noCache = conf.getBoolean("spark.ss.noCache.enabled", false) // experimental configuration
++  */
++
++  //private val isSSparkOptimizeEnabled = sc.getMutableConf("optimize")
++  private val isSSparkProfileEnabled = sc.isSSparkProfileEnabled
++  private val isSSparkLogEnabled = sc.isSSparkLogEnabled
++  private val sizeProfileMode = conf.getOption("spark.ss.profile.mode")
++                                    .getOrElse("toArray") // toArray, cache, sampling
++  private val noCache = sc.noCache
++  
++
++  /* move to SparkContext
++>>>>>>> LOSIC
++  def isHadoopRDD(op: String): Boolean = {
++    if (op == "hadoopFile" ||
++        op == "objectFile" ||
++        op == "sequenceFile" ||
++        op == "textFile") {
++        true
++      }
++    else
++      false
++  }
++<<<<<<< HEAD
++  
++  def optimizeCache() = {
++    // maybe need to change id 0 to rddname HadoopRDD
++    //if (!sc.cacheCandidates.filter(x => x.opId == newCreationSite).isEmpty && this.id != 0) {
++    if (sc.cacheList.contains(newCreationSite) && this.id != 0) {
++=======
++
++  def uncachableRDD(op: String): Boolean = {
++    if (op == "sequenceFile" ||
++        op == "newAPIHadoopFile" ||
++        op == "hadoopRDD" ) {
++          true
++    }
++    else
++      false    
++  }
++  */
++  
++  def optimizeCache() = {
++    // maybe need to change id 0 to rddname HadoopRDD -> changed on 17 Apr. 25
++    //if (!sc.cacheCandidates.filter(x => x.opId == newCreationSite).isEmpty && this.id != 0) {
++    if (sc.cacheList.contains(newCreationSite) && this.id != 0) { //!isHadoopRDD) {
++>>>>>>> LOSIC
++      logInfoSSP(s"optimize caching ${this.id} at ${newCreationSite}", isSSparkLogEnabled)
++      this.persist()
++    }
++  }
++
+   /**
+    * Internal method to this RDD; will read from cache if applicable, or otherwise compute it.
+    * This should ''not'' be called by users directly, but is available for implementors of custom
+    * subclasses of RDD.
++   * 
++   * SSPARK: This method has been modified, update block infos to taskmetrics
+    */
+   final def iterator(split: Partition, context: TaskContext): Iterator[T] = {
++<<<<<<< HEAD
++    if(isSSparkProfileEnabled) {
++      val firstRDD = rootLineage.last
++      val getMetrics = context.taskMetrics() 
++      synchronized {
++        val blockScheduledTime = System.nanoTime // SSPARK: this is not an actual start time of block computation because of lazy execution model
++      
++        logInfoSSP(s"Start Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockScheduledTime", isSSparkLogEnabled)
++        val startInfo = new getMetrics.BlockInfos(blockScheduledTime, true,  this.id, split.index, isCachedBlock, firstRDD)
++        getMetrics.setBlockTime(startInfo)
++      }
++
++      val (iterRet, iterLocal) = iteratorImpl(split, context).duplicate 
++      // SSPARK: call original iterator(), make a duplicated iterator for returning and checking size   
++      logInfoSSP(s"RDD name = ${rootName.last}")
++      synchronized {
++        //if (this.id != 0) {   // Data skew occurs when traversing the duplicated iterator of the first data block read from storage
++        if ( !(this.id == 0 && isHadoopRDD(rootName.last)) ) {
++          val iterArray = iterLocal.toArray
++          val iterSize = SizeEstimator.estimate(iterArray)
++        
++          getMetrics.setBlockSize(this.id, iterSize)
++          // logInfoSSP(s"${this.id}[${split.index}] ${iterSize}")
++        }
++
++        val blockEndTime = System.nanoTime
++        val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++        getMetrics.setBlockTime(endInfo)
++    
++        logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++      }
++      iterRet
++=======
++    //val profilePlanner = SparkContext.profilePlanner.value
++    logInfoSSP(s"Check conf. -> profile: $isSSparkProfileEnabled, optimize: $isSSparkOptimizeEnabled", isSSparkLogEnabled)
++    logInfoSSP(s"Got profilePlanner -> ${profileRDDs} ID-> ${this.id} sizeSkip-> $skipSizeProfile, timeSkip-> $skipTimeProfile" , isSSparkLogEnabled)
++    if(isSSparkProfileEnabled && !skipTimeProfile) { // && profilePlanner.contains(this.id)) {
++      val firstRDD = rootLineage.last
++      val getMetrics = context.taskMetrics() 
++      //val (isCachableHadoopRDD, isUncachableHadoopRDD) = rddCheck(this.id)
++      
++      val blockScheduledTime = System.nanoTime // SSPARK: this is not an actual start time of block computation because of lazy execution model
++      
++      logInfoSSP(s"Start Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockScheduledTime", isSSparkLogEnabled)
++      val startInfo = new getMetrics.BlockInfos(blockScheduledTime, true,  this.id, split.index, isCachedBlock, firstRDD)
++      getMetrics.setBlockTime(startInfo)
++      
++      if (skipSizeProfile) {
++        val iterRet = iteratorImpl(split, context)
++        logInfoSSP(s"skip size profiling ${this.id}", isSSparkLogEnabled)
++        val blockEndTime = System.nanoTime
++        val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++        getMetrics.setBlockTime(endInfo)
++      
++        logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++        
++        iterRet
++      }
++      else {
++        if (sizeProfileMode == "toArray") {
++          if (isHadoopRDD) {
++            val iterRet = iteratorImpl(split, context)
++            logInfoSSP(s"iterator stage $stageId RDD ${this.id} is HadoopRDD, skip size profiling", isSSparkLogEnabled)
++            val blockEndTime = System.nanoTime
++            val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++            getMetrics.setBlockTime(endInfo)
++          
++            logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++            
++            iterRet
++          }
++          else {
++            val (iterRet, iterLocal) = iteratorImpl(split, context).duplicate
++            
++            logInfoSSP(s"iterator stage $stageId RDD ${this.id}, size profiling", isSSparkLogEnabled)
++            val iterArray = iterLocal.toArray
++            val iterSize = SizeEstimator.estimate(iterArray)
++            //iterArray = null
++
++            getMetrics.setBlockSize(this.id, iterSize)
++            val blockEndTime = System.nanoTime
++            val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++            getMetrics.setBlockTime(endInfo)
++        
++            logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++            
++            iterRet
++          }
++        }
++
++        else { //if (sizeProfileMode == "cache") {  // need to process on driver
++          val blockEndTime = System.nanoTime
++          val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++          getMetrics.setBlockTime(endInfo)
++          
++          logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++          iteratorImpl(split, context)
++        }
++      }
++
++      /* //Cachable/Uncachable version 
++      if (sizeProfileMode == "toArray") {
++        if ( isUncachableHadoopRDD ) {
++          val iterRet = iteratorImpl(split, context)
++          logInfoSSP(s"iterator stage $stageId RDD ${this.id} isUncachableHadoopRDD", isSSparkLogEnabled)
++          val blockEndTime = System.nanoTime
++          val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++          getMetrics.setBlockTime(endInfo)
++        
++          logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++          
++          iterRet
++        }
++        else if ( isCachableHadoopRDD ) {
++          if (this.id == firstRDD) {
++            val iterRet = iteratorImpl(split, context)
++            logInfoSSP(s"iterator stage $stageId RDD ${this.id} isCachableHadoopRDD", isSSparkLogEnabled)
++            val blockEndTime = System.nanoTime
++            val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++            getMetrics.setBlockTime(endInfo)
++        
++            logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++          
++            iterRet
++          }
++          else {
++            val (iterRet, iterLocal) = iteratorImpl(split, context).duplicate
++            logInfoSSP(s"iterator stage $stageId RDD ${this.id} not first isCachableHadoopRDD, profile size", isSSparkLogEnabled)
++            val iterArray = iterLocal.toArray
++            val iterSize = SizeEstimator.estimate(iterArray)
++            getMetrics.setBlockSize(this.id, iterSize)
++            val blockEndTime = System.nanoTime
++            val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++            getMetrics.setBlockTime(endInfo)
++        
++            logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++            iterRet
++          }
++        }
++        else {
++          val (iterRet, iterLocal) = iteratorImpl(split, context).duplicate
++          logInfoSSP(s"iterator stage $stageId RDD ${this.id} profile size", isSSparkLogEnabled)
++          val iterArray = iterLocal.toArray
++          val iterSize = SizeEstimator.estimate(iterArray)
++          getMetrics.setBlockSize(this.id, iterSize)
++          val blockEndTime = System.nanoTime
++          val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++          getMetrics.setBlockTime(endInfo)
++        
++          logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++          iterRet
++        }
++        /*
++        val blockEndTime = System.nanoTime
++        val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++        getMetrics.setBlockTime(endInfo)
++        
++        logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++        iterRet
++        */
++      }
++            
++      else if (sizeProfileMode == "cache") {  // need to process on driver
++        val blockEndTime = System.nanoTime
++        val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++        getMetrics.setBlockTime(endInfo)
++        
++        logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++        iteratorImpl(split, context)
++      }
++      else if (sizeProfileMode == "sampling") {
++        if ( !(this.id == 0 && isCachableHadoopRDD) ) {
++          val iter = iteratorImpl(split, context)
++          val sampleSize = 10
++          val sampledElems = iter.take(sampleSize).toArray
++          val avgElemSize = sampledElems.map(x => SizeEstimator.estimate(x.asInstanceOf[AnyRef])).sum / sampleSize
++
++          val totalElements = iter.size + sampleSize
++          val estimatedSize = totalElements * avgElemSize
++
++          getMetrics.setBlockSize(this.id, estimatedSize)
++        }
++        val blockEndTime = System.nanoTime
++        val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++        getMetrics.setBlockTime(endInfo)
++        
++        logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++
++        iteratorImpl(split, context)
++      } 
++
++      else {
++        logErrorSSP(s"Wrong profile mode $sizeProfileMode, needs toArray, cache or sampling")
++        iteratorImpl(split, context)
++      } */
++        
++      
++        
++      /*  //Old version
++      val (iterRet, iterLocal) = iteratorImpl(split, context).duplicate
++      // SSPARK: call original iterator(), make a duplicated iterator for returning and checking size   
++      //logInfoSSP(s"RDD name = ${rootName.last}", isSSparkLogEnabled)
++      //synchronized {
++        //if (this.id != 0) {   // Data skew occurs when traversing the duplicated iterator of the first data block read from storage
++        val sizeCheckStart = System.currentTimeMillis() // need to eliminate
++        if ( !(this.id == 0 && isHadoopRDD(rootName.last)) ) {
++          val toArrayStart = System.currentTimeMillis() //
++          val iterArray = iterLocal.toArray
++          val toArrayEnd = System.currentTimeMillis() //
++          
++          val iterSize = SizeEstimator.estimate(iterArray)
++          val estimateEnd = System.currentTimeMillis() //
++        
++          getMetrics.setBlockSize(this.id, iterSize)
++          
++          val setEnd = System.currentTimeMillis() //
++          // logInfoSSP(s"${this.id}[${split.index}] ${iterSize}")
++          logInfoSSP(s"toArray: ${toArrayEnd - toArrayStart}, estimate: ${estimateEnd - toArrayEnd}, setEnd: ${setEnd - estimateEnd}")
++          val blockEndTime = System.nanoTime
++          val sizeCheckEnd = System.currentTimeMillis()
++          val endInfo = new getMetrics.BlockInfos(blockEndTime, false,  this.id, split.index, isCachedBlock, firstRDD)
++          getMetrics.setBlockTime(endInfo)
++
++          logInfoSSP(s"Size checking time for rdd ${this.id}, ${sizeCheckEnd - sizeCheckStart}", isSSparkLogEnabled)
++          logInfoSSP(s"End Task ${context.taskAttemptId} rdd ${this.id} root ${firstRDD}, $blockEndTime", isSSparkLogEnabled)
++          
++          
++        }
++        
++      
++      iterRet  */
++>>>>>>> LOSIC
++    }
++    else
++    {
++      iteratorImpl(split, context)
++    }
++  }
++
++  /**
++   * SSPARK: Original implementation of "iterator"
++   */
++  final def iteratorImpl(split: Partition, context: TaskContext): Iterator[T] = {
+     if (storageLevel != StorageLevel.NONE) {
+       getOrCompute(split, context)
+     } else {
+@@ -343,6 +757,11 @@ abstract class RDD[T: ClassTag](
+     if (isCheckpointedAndMaterialized) {
+       firstParent[T].iterator(split, context)
+     } else {
++<<<<<<< HEAD
++=======
++      logInfoSSP(s"compute RDD ${this.id}", isSSparkLogEnabled)
++      context.taskMetrics().computedRdds.add(this.id)
++>>>>>>> LOSIC
+       compute(split, context)
+     }
+   }
+@@ -360,6 +779,11 @@ abstract class RDD[T: ClassTag](
+     }) match {
+       case Left(blockResult) =>
+         if (readCachedBlock) {
++          isCachedBlock = true  // SSPARK: set the isCachedBlock true
++<<<<<<< HEAD
++=======
++          logInfoSSP(s"cached RDD ${this.id}", isSSparkLogEnabled)
++>>>>>>> LOSIC
+           val existingMetrics = context.taskMetrics().inputMetrics
+           existingMetrics.incBytesRead(blockResult.bytes)
+           new InterruptibleIterator[T](context, blockResult.data.asInstanceOf[Iterator[T]]) {
+@@ -369,9 +793,17 @@ abstract class RDD[T: ClassTag](
+             }
+           }
+         } else {
++<<<<<<< HEAD
++          new InterruptibleIterator(context, blockResult.data.asInstanceOf[Iterator[T]])
++        }
++      case Right(iter) =>
++=======
++          logInfoSSP(s"blockResult RDD ${this.id}", isSSparkLogEnabled)
+           new InterruptibleIterator(context, blockResult.data.asInstanceOf[Iterator[T]])
+         }
+       case Right(iter) =>
++        logInfoSSP(s"iter RDD ${this.id}", isSSparkLogEnabled)
++>>>>>>> LOSIC
+         new InterruptibleIterator(context, iter.asInstanceOf[Iterator[T]])
+     }
+   }
+@@ -1730,6 +2162,7 @@ abstract class RDD[T: ClassTag](
+ 
+   private var storageLevel: StorageLevel = StorageLevel.NONE
+ 
++  
+   /** User code that created this RDD (e.g. `textFile`, `parallelize`). */
+   @transient private[spark] val creationSite = sc.getCallSite()
+ 
+@@ -1749,6 +2182,33 @@ abstract class RDD[T: ClassTag](
+   private[spark] def elementClassTag: ClassTag[T] = classTag[T]
+ 
+   private[spark] var checkpointData: Option[RDDCheckpointData[T]] = None
++  
++  /* SSPARK: make a new creation sites because we need to distinguish every single RDD, 
++   * including RDD_x and RDD_y from randomSplit,
++   * RDDs with same operation and callSite (e.g., rddx.map(f1).map(f2)) STE doesn't have column info.
++   * rdd.id may distinguish but cannot when application has a different iteration counts when re-run.
++   */
++  @transient private[spark] val newCreationSite: String = sc.newRddCallSite(scope)
++  
++<<<<<<< HEAD
++=======
++  
++  if (sizeProfileMode == "cache") {
++    if ( !(this.id == 0 || this.id == 1) ) {
++      this.persist(StorageLevel.MEMORY_ONLY, true)
++    }
++  }
++>>>>>>> LOSIC
++  //SSPARK cache optimize
++  if (isSSparkOptimizeEnabled) {
++    this.optimizeCache()
++  }
++    
++  /*
++  if (isSSparkProfileEnabled && id == 0) {
++    sc.setNewAppName(this)
++  }
++  */
+ 
+   // Whether to checkpoint all ancestor RDDs that are marked for checkpointing. By default,
+   // we stop as soon as we find the first such RDD, an optimization that allows us to write
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/DAGScheduler.scala b/core/src/main/scala/org/apache/spark/scheduler/DAGScheduler.scala
+index 18baa0b..8c227be 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/DAGScheduler.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/DAGScheduler.scala
+@@ -16,6 +16,9 @@
+  */
+ 
+ package org.apache.spark.scheduler
++import java.nio.file.{Files, Paths}             //* 
++import java.io.{File, FileWriter}               // SSPARK
++import scala.collection.mutable.LinkedHashMap   //*
+ 
+ import java.io.NotSerializableException
+ import java.util.Properties
+@@ -248,6 +251,14 @@ private[spark] class DAGScheduler(
+   private[spark] val eventProcessLoop = new DAGSchedulerEventProcessLoop(this)
+   taskScheduler.setDAGScheduler(this)
+ 
++<<<<<<< HEAD
++  private val isSSparkLogEnabled = sc.getConf.getBoolean("spark.ssparkLog.enabled", false)
++  private val isSSparkProfileEnabled = sc.getConf.getBoolean("spark.ssparkProfile.enabled", false)
++=======
++  private val isSSparkLogEnabled = sc.getConf.getBoolean("spark.ss.log.enabled", false)
++  private val isSSparkProfileEnabled = sc.getConf.getBoolean("spark.ss.profile.enabled", false)
++>>>>>>> LOSIC
++  
+   /**
+    * Called by the TaskSetManager to report task's starting.
+    */
+@@ -1078,9 +1089,20 @@ private[spark] class DAGScheduler(
+     }
+   }
+ 
++  var selectCandidatesThread: Option[Thread] = None
++<<<<<<< HEAD
++
++  /** Submits stage, but first recursively submits any missing parents. */
++  private def submitStage(stage: Stage) {
++    val jobId = activeJobForStage(stage)
++=======
++  
+   /** Submits stage, but first recursively submits any missing parents. */
+   private def submitStage(stage: Stage) {
+     val jobId = activeJobForStage(stage)
++    val isSSparkOptimizeEnabled = sc.getMutableConf("optimize")
++    
++>>>>>>> LOSIC
+     if (jobId.isDefined) {
+       logDebug(s"submitStage($stage (name=${stage.name};" +
+         s"jobs=${stage.jobIds.toSeq.sorted.mkString(",")}))")
+@@ -1088,6 +1110,107 @@ private[spark] class DAGScheduler(
+         val missing = getMissingParentStages(stage).sortBy(_.id)
+         logDebug("missing: " + missing)
+         if (missing.isEmpty) {
++<<<<<<< HEAD
++          if (isSSparkProfileEnabled) 
++            sc.makeLineage(jobId.get, stage.id, stage.rdd)  // SSPARK: make lineage on each Stage
++                    
++          if (sc.isSSparkOptimizeEnabled) {
++            val lineage = sc.getLineage(stage.id)
++            val rootLineage = sc.rootLineage.last
++            val (stageInputBytes, startType) = sc.getStageInputBytes(lineage, rootLineage)
++            logInfoSSP(s"stage ${stage.id} input size = $stageInputBytes bytes from $startType", isSSparkLogEnabled)
++
++=======
++          //if (isSSparkProfileEnabled) {
++          sc.makeLineage(jobId.get, stage.id, stage.rdd)  // SSPARK: make lineage on each Stage
++          stage.rdd.setStageId(stage.id)
++          val lineage = sc.getLineage(stage.id)
++          
++          /*lineage.foreach{ x =>
++            stage.rdd.rddNames += (x._1 -> x._2.name)
++          }*/
++          val rootLineage = sc.rootLineage.last
++          val (stageInputBytes, startType) = sc.getStageInputBytes(lineage, rootLineage)
++          logInfoSSP(s"stage ${stage.id} input size = $stageInputBytes bytes from $startType", isSSparkLogEnabled)
++          //}
++          if (sc.isSSparkMemCheck) {
++            sc.getRemainingStorageMem()
++          }
++          if (sc.isSSparkProfileEnabled) { // make profile planner
++            sc.makeProfilePlanner(lineage, rootLineage, stageInputBytes)
++          }
++
++          if (isSSparkOptimizeEnabled) {
++>>>>>>> LOSIC
++            if (sc.optimizeMode == "ahead") {
++              val startSC = System.currentTimeMillis()
++              sc.selectCandidates(stage.id, stageInputBytes) 
++              sc.checkOptimizeCache(stage.rdd)
++              val endSC = System.currentTimeMillis()
++              val timeSC = endSC - startSC
++              logInfoSSP(s"[Ahead mode] selectCandidates time: ${timeSC} ms", isSSparkLogEnabled)
++            }
++            else if (sc.optimizeMode == "overlap") {
++<<<<<<< HEAD
++=======
++              logInfoSSP(s"[Overlap mode] try to start selectCandidates thread...", isSSparkLogEnabled)
++>>>>>>> LOSIC
++              val thread = sc.createSelectCandidatesThread(stage.id, stage.rdd, stageInputBytes)
++              thread.start
++              selectCandidatesThread = Some(thread)
++            }
++            else {
++<<<<<<< HEAD
++              logErrorSSP(s"""Wrong sspark.optimizeMode: ${sc.optimizeMode} need "overlap" or "ahead"""")
++            }
++          }
++          
++          /*
++          //var selectCandidates: Option[Thread] = None
++          if (sc.isSSparkOptimizeEnabled) {
++            val startSC = System.currentTimeMillis() // Non-thread impl
++            val rootLineage = sc.rootLineage.last
++            val lineage = sc.getLineage(stage.id)
++            val stageInputBytes = {
++              if (lineage.get(rootLineage).get.deps.contains(-2)) 
++                sc.inputBytes
++              else if (lineage.get(rootLineage).get.deps.contains(-1))
++                sc.shuffleBytes
++              else if (lineage.get(rootLineage).get.deps.contains(-3)) 
++                0L
++              else {
++                logErrorSSP(s"Cannot find stage input size ${lineage.get(rootLineage)}")
++                0L
++              }
++            }
++            if (isSSparkLogEnabled) {
++              val startType = { 
++                if (lineage.get(rootLineage).get.deps.contains(-2)) 
++                  "HadoopRDD"
++                else if  (lineage.get(rootLineage).get.deps.contains(-1))
++                  "ShuffleRDD"
++                else if (lineage.get(rootLineage).get.deps.contains(-3))
++                  "ParallelCollectionRDD"
++                else
++                  "ERROR"
++              }
++              logInfoSSP(s"stage ${stage.id} input size = $stageInputBytes bytes from $startType")
++            }
++            //val thread = sc.createSelectCandidatesThread(stage.id, stageInputBytes)
++            //thread.start
++            sc.selectCandidates(stage.id, stageInputBytes)  // Non-thread impl
++            sc.checkOptimizeCache(stage.rdd)
++            val endSC = System.currentTimeMillis()    // Non-thread impl
++            val timeSC = endSC - startSC              // Non-thread impl
++            logInfoSSP(s"selectCandidates time: ${timeSC}ms", isSSparkLogEnabled) // Non-thread impl
++          }
++          */
++        
++=======
++              logErrorSSP(s"""Wrong ss.optimize.mode: ${sc.optimizeMode} need "overlap" or "ahead"""")
++            }
++          }
++>>>>>>> LOSIC
+           logInfo("Submitting " + stage + " (" + stage.rdd + "), which has no missing parents")
+           submitMissingTasks(stage, jobId.get)
+         } else {
+@@ -1296,6 +1419,12 @@ private[spark] class DAGScheduler(
+             e)
+       }
+     }
++<<<<<<< HEAD
++    // SSPARK: may have null exception, just for checking consistency
++    //logInfoSSP(s"received BlockTime from task ${event.taskInfo.id} ${event.accumUpdates.find(a => a.name == Some(InternalAccumulator.BLOCK_TIME)).get.value}")
++    //logInfoSSP(s"received BlockSize from task ${event.taskInfo.id} ${event.accumUpdates.find(a => a.name == Some(InternalAccumulator.BLOCK_SIZE)).get.value}")
++=======
++>>>>>>> LOSIC
+   }
+ 
+   private def postTaskEnd(event: CompletionEvent): Unit = {
+@@ -1861,6 +1990,598 @@ private[spark] class DAGScheduler(
+         jobIdToActiveJob(jobId), "Job %d cancelled %s".format(jobId, reason.getOrElse("")))
+     }
+   }
++  
++<<<<<<< HEAD
++  private def isHadoopRDD(op: String): Boolean = {
++    if (op == "hadoopFile" ||
++      op == "objectFile" ||
++      op == "sequenceFile" ||
++      op == "textFile") {
++      true
++    }
++    else
++      false
++  }
++
++=======
++>>>>>>> LOSIC
++  /* 
++   *  SSPARK: A function that calculates the RDD size by merging the sizes of each block based on the RDD id.
++   */
++  private def blockSizeToRddSize(blockSize: java.util.List[(Int, Long)], stageId: Int): HashMap[Int, Long] ={
++    val lineage = sc.getLineage(stageId)
++    var rddSize = new HashMap[Int, Long]
++    for(i <- 0 to blockSize.size()-1) {
++      val cur = blockSize.get(i)
++      if (rddSize.contains(cur._1)) {
++        rddSize(cur._1) += cur._2
++      }
++      else {
++        if (lineage.contains(cur._1))
++          rddSize.put(cur._1, cur._2)
++        else
++          logErrorSSP(s"unrecognized BlockSize for rdd id ${cur._1} on stage ${stageId}")
++      }
++    }
++    rddSize
++  }
++  
++  /* 
++   *  SSPARK: A function that calculates the RDD time by merging the times of each block based on the RDD id.
++   *  This calculates the RDD computation time using a heuristic method. 
++   *  The absolute execution time of RDD cannot be obtained in Spark, a distributed environment.
++   *  We assume that the RDD time is the ratio of the calculation time of RDD blocks(tasks) 
++   *  to the total stage time using the following formula.
++   *  RDD time = sum times of corresponding blocks / sum times of all block times in the stage * time of stage
++   */
++  private def blockTimeToRddTime(blockTime: java.util.List[(Int, Long)], stageTime: Long, stageId: Int): HashMap[Int, Long] ={
++    val lineage = sc.getLineage(stageId)
++    var rddTime = new HashMap[Int, Long]
++    var sumBlockTime = 0L
++    for(i <- 0 to blockTime.size()-1) {
++      val cur = blockTime.get(i)
++      //if(cur._1 == 0){ // only BlockTime has rdd 0, and it should be accumulated into rdd 1
++<<<<<<< HEAD
++      if(cur._1 == 0 && isHadoopRDD(lineage(cur._1).name)) {
++=======
++      if(cur._1 == 0 && sc.isPairHadoopRDD(lineage(cur._1).name)) {
++>>>>>>> LOSIC
++        if (rddTime.contains(1)) {
++          rddTime(1) += cur._2
++          sumBlockTime += cur._2
++        }
++        else {
++          rddTime.put(1, cur._2)
++          sumBlockTime += cur._2
++        }
++      }
++      else {
++        if (rddTime.contains(cur._1)) {
++          rddTime(cur._1) += cur._2
++          sumBlockTime += cur._2
++        }
++        else {
++          if (lineage.contains(cur._1)) {
++            rddTime.put(cur._1, cur._2)
++            sumBlockTime += cur._2
++          }
++          else
++            logErrorSSP(s"unrecognized BlockTime for rdd id ${cur._1} on stage ${stageId}")
++        }
++      }
++    }
++    rddTime = rddTime.map ( x => x._1 -> (x._2.toDouble / sumBlockTime.toDouble * stageTime.toDouble).toLong)
++    rddTime
++  }
++
++<<<<<<< HEAD
++  /* 
++  *  SSPARK: A function that calculates and merges the profiled data
++=======
++  private def handleComputedRdds(stage: Stage, lineage: LinkedHashMap[Int, sc.LineageInfo]): Unit = {
++    import scala.collection.JavaConverters._
++
++    val accum = stage.latestInfo.accumulables
++    val computedRdds = new HashSet[Int]
++
++    val accumComputedRdds = accum.find(x => x._2.name == Some(InternalAccumulator.COMPUTED_RDDS))
++    accumComputedRdds match{
++      case Some(x) =>
++        if (x._2.value != None) {
++          val getComputedRdds = x._2.value.get.asInstanceOf[java.util.List[Int]]
++          logInfoSSP(s"reduced computedRdds from stage ${stage.id} $getComputedRdds", isSSparkLogEnabled)
++          
++          computedRdds ++= getComputedRdds.asScala
++          logInfoSSP(s"computedRdds ${computedRdds}", isSSparkLogEnabled)
++        }
++        else
++          logErrorSSP("Couldn't find computedRdds value")
++      case _ => logInfoSSP(s"None computedRdds", isSSparkLogEnabled)  
++    }
++    sc.computedCount += computedRdds.size
++
++    if (sc.isSSparkCountFunctional) {
++      val count = computedRdds.count { rddId =>
++        lineage.contains(rddId) && sc.functionalOps.contains(lineage(rddId).name)
++      }
++      sc.countFunctional += count
++      logInfoSSP(s"functionalCount ${sc.countFunctional} (+$count)", isSSparkLogEnabled)
++    }
++
++    logInfoSSP(s"computedCount ${sc.computedCount} (+${computedRdds.size})", isSSparkLogEnabled)
++  }
++  /* 
++  *  SSPARK: A function that calculates and merges the profiled data
++  *  checked no overhead 27 Feb.
++>>>>>>> LOSIC
++  */
++  private def handleProfiled(stage: Stage): Unit = {
++    val accum = stage.latestInfo.accumulables
++    // may occur runtime error when submissionTime or completionTime is not set
++    var rddTime = new HashMap[Int, Long]
++    var rddSize = new HashMap[Int, Long]
++
++    val stageNanoTime = (stage.latestInfo.completionTime.get - stage.latestInfo.submissionTime.get) * 1000000L
++    
++    val accumBlockTime = accum.find(x => x._2.name == Some(InternalAccumulator.BLOCK_TIME))
++    accumBlockTime match{
++      case Some(x) =>
++        if (x._2.value != None) {
++          val getBlockTime = x._2.value.get.asInstanceOf[java.util.List[(Int, Long)]]
++          logInfoSSP(s"reduced BlockTime from stage ${stage.id} $getBlockTime", isSSparkLogEnabled)
++          rddTime = blockTimeToRddTime(getBlockTime, stageNanoTime, stage.id)
++          logInfoSSP(s"RddTime ${rddTime}", isSSparkLogEnabled)
++        }
++        else
++          logErrorSSP("Couldn't find accumBlockTime value")  
++<<<<<<< HEAD
++      case _ => logInfoSSP("None accumBlockTime $accumBlockTime", isSSparkLogEnabled)  
++    }
++
++=======
++      case _ => logInfoSSP(s"None accumBlockTime", isSSparkLogEnabled)  
++    }
++
++    
++>>>>>>> LOSIC
++    val accumBlockSize = accum.find(x => x._2.name == Some(InternalAccumulator.BLOCK_SIZE))
++    accumBlockSize match{
++      case Some(x) =>
++        if (x._2.value != None) {
++          val getBlockSize = x._2.value.get.asInstanceOf[java.util.List[(Int, Long)]]
++          logInfoSSP(s"reduced BlockSize from stage ${stage.id} $getBlockSize", isSSparkLogEnabled)
++          rddSize = blockSizeToRddSize(getBlockSize, stage.id)
++          logInfoSSP(s"RddSize ${rddSize}", isSSparkLogEnabled)
++        }
++        else
++          logErrorSSP("Couldn't find accumBlockSize value")
++<<<<<<< HEAD
++      case _ => logInfoSSP("None accumBlockSize $accumBlockSize", isSSparkLogEnabled)  
++    }
++
++    /*
++    // is it possible None? ALS Error
++    val accumBlockTime = accum.find(x => x._2.name == Some(InternalAccumulator.BLOCK_TIME)).get._2
++    if (accumBlockTime.value != None) {
++      val getBlockTime = accumBlockTime.value.get.asInstanceOf[java.util.List[(Int, Long)]]
++      logInfoSSP(s"reduced BlockTime from stage ${stage.id} $getBlockTime")
++      rddTime = blockTimeToRddTime(getBlockTime, stageNanoTime)
++      logInfoSSP(s"RddTime ${rddTime}")
++    }
++    else
++      logErrorSSP("Couldn't find accumBlockTime value")  
++    
++    val accumBlockSize = accum.find(x => x._2.name == Some(InternalAccumulator.BLOCK_SIZE)).get._2
++    if (accumBlockSize.value != None) {
++      val getBlockSize = accumBlockSize.value.get.asInstanceOf[java.util.List[(Int, Long)]]
++      logInfoSSP(s"reduced BlockSize from stage ${stage.id} $getBlockSize")
++      rddSize = blockSizeToRddSize(getBlockSize)
++      logInfoSSP(s"RddSize ${rddSize}")
++    }
++    else
++      logErrorSSP("Couldn't find accumBlockSize value")
++    */
++
++    logInfoSSP(s"Lineage ${stage.id} ${sc.getLineage(stage.id)}", isSSparkLogEnabled) //
++    //logInfoSSP(s"Lineages ${sc.lineages}")
++    if (rddTime.size > 0 || rddSize.size > 0)
++      makeSaveForm(stage, rddTime, rddSize)
++    else
++      logErrorSSP(s"Nothing in rddTime:${rddTime} or rddSize:${rddSize}")
++=======
++      case _ => logInfoSSP(s"None accumBlockSize", isSSparkLogEnabled)  
++    }
++
++    //logInfoSSP(s"Lineage ${stage.id} ${sc.getLineage(stage.id)}", isSSparkLogEnabled) //
++    
++    if (rddTime.size > 0 || rddSize.size > 0)
++      makeSaveForm(stage, rddTime, rddSize)
++    else
++      logInfoSSP(s"Nothing in rddTime:${rddTime} or rddSize:${rddSize}", isSSparkLogEnabled)
++>>>>>>> LOSIC
++    
++  }
++
++  val opTimePerIn = HashSet[(String, Long, Long)]()
++  val opOutPerIn = HashSet[(String, Long, Long)]()
++
++  // SSPARK: make "time per input size" & "output size per input size"
++<<<<<<< HEAD
++=======
++  // checked no overhead, 27 Feb.
++>>>>>>> LOSIC
++  private def makeSaveForm(stage: Stage, rddTime: HashMap[Int, Long], rddSize: HashMap[Int, Long]): Unit = {
++    /* 
++      1. need file size (read size) for RDD 1
++          calc input size
++      2. merge same rdd name & callSite into one operation
++      3. filter unnecessary operations, e.g., shuffle 
++          may start from lineage.head and when meet recoginized operation (sc)
++    */
++    
++    val lineage = sc.getLineage(stage.id)
++    val accum = stage.latestInfo.accumulables
++    opTimePerIn.clear()
++    opOutPerIn.clear()
++
++    val accumInputBytes = accum.find(x => x._2.name == Some(InternalAccumulator.input.BYTES_READ)) match {
++      case Some(x) => x._2.value.get.asInstanceOf[Long]
++      case _ => 0L
++    }
++    val accumShuffleRemote = accum.find(x => x._2.name == Some(InternalAccumulator.shuffleRead.REMOTE_BYTES_READ)) match {
++      case Some(x) => x._2.value.get.asInstanceOf[Long]
++      case _ => 0L
++    }
++    val accumShuffleLocal = accum.find(x => x._2.name == Some(InternalAccumulator.shuffleRead.LOCAL_BYTES_READ)) match {
++      case Some(x) => x._2.value.get.asInstanceOf[Long]
++      case _ => 0L
++    }
++    val accumShuffleWrite = accum.find(x => x._2.name == Some(InternalAccumulator.shuffleWrite.BYTES_WRITTEN)) match {
++      case Some(x) => x._2.value.get.asInstanceOf[Long]
++      case _ => 0L
++    }
++    if (accumShuffleWrite != 0L)
++      sc.shuffleBytes = accumShuffleWrite // assign current stage's write size for using next stage input
++
++    val accumShuffleBytes: Long = accumShuffleRemote + accumShuffleLocal
++    //is it possible that lineage has multiple rdd operations which are same callSite&name without dependency?
++    //probably not... then don't need to check dependency, just check name & callSite
++    
++<<<<<<< HEAD
++=======
++    // check and set hadoopRDDs size
++    val missingKeys = rddTime.keySet.diff(rddSize.keySet).filter(sc.hadoopRDDs.contains(_))
++    missingKeys.foreach { x =>
++      rddSize.put(x, accumInputBytes)
++    }
++    
++>>>>>>> LOSIC
++    def rddProfileToOpProfile(nameWithCallSite: String, in: Any, out: Any, time: Any): Unit = {
++      val name = nameWithCallSite.split('(')(0)
++      //if (sc.isShuffleOp(name)) {
++        // do nothing, 
++        // just comment out this condition, if all operation profiling needs
++      //  None
++      //}
++      //else {
++<<<<<<< HEAD
++=======
++        /*
++      if (sc.isUncachableHadoopRDD(name)) {
++        if (opTimePerIn.find(x => x._1 == nameWithCallSite) != None
++          && opOutPerIn.find(x => x._1 == nameWithCallSite) != None) {
++          // exist already
++          // sequenceFile encounter this case??
++          logInfoSSP("sequenceFile??")
++          val prevElemTPI = opTimePerIn.find(x => x._1 == nameWithCallSite).get
++          val prevElemOPI = opOutPerIn.find(x => x._1 == nameWithCallSite).get
++
++          var updatedIn = prevElemOPI._2
++          var updatedTime = prevElemTPI._3
++          var updatedOut = prevElemOPI._3
++
++          updatedIn = in.asInstanceOf[Long]       // change child input to parent input
++          //updatedOut don't need to change, becasue it should be youngest node
++          updatedTime += time.asInstanceOf[Long]  // RDD times should be added into one operation time
++
++          opTimePerIn -= prevElemTPI
++          opOutPerIn -= prevElemOPI
++          opTimePerIn.add( (nameWithCallSite, updatedIn, updatedTime) )
++          opOutPerIn.add( (nameWithCallSite, updatedIn, updatedOut) )
++        }
++        else if (opTimePerIn.find(x => x._1 == nameWithCallSite) != None
++          || opOutPerIn.find(x => x._1 == nameWithCallSite) != None)
++          logErrorSSP("Error case")
++        else {
++          opTimePerIn.add( (nameWithCallSite, in.asInstanceOf[Long], time.asInstanceOf[Long]) )
++          // uncacheableHadoopRDD cannot measure the size, so it forces the input size to be used as the output size.
++          opOutPerIn.add( (nameWithCallSite, in.asInstanceOf[Long], in.asInstanceOf[Long]) )  // in, in
++        }
++      }
++
++      else {*/
++>>>>>>> LOSIC
++        if (out != None && in != None && time != None){
++          if (opTimePerIn.find(x => x._1 == nameWithCallSite) != None
++            && opOutPerIn.find(x => x._1 == nameWithCallSite) != None) {
++            // exist already
++            val prevElemTPI = opTimePerIn.find(x => x._1 == nameWithCallSite).get
++            val prevElemOPI = opOutPerIn.find(x => x._1 == nameWithCallSite).get
++
++            var updatedIn = prevElemOPI._2
++            var updatedTime = prevElemTPI._3
++            var updatedOut = prevElemOPI._3
++
++            updatedIn = in.asInstanceOf[Long]       // change child input to parent input
++            //updatedOut don't need to change, becasue it should be youngest node
++            updatedTime += time.asInstanceOf[Long]  // RDD times should be added into one operation time
++
++            opTimePerIn -= prevElemTPI
++            opOutPerIn -= prevElemOPI
++            opTimePerIn.add( (nameWithCallSite, updatedIn, updatedTime) )
++            opOutPerIn.add( (nameWithCallSite, updatedIn, updatedOut) )
++
++          }
++          else if (opTimePerIn.find(x => x._1 == nameWithCallSite) != None
++            || opOutPerIn.find(x => x._1 == nameWithCallSite) != None)
++            logErrorSSP("Error case")
++          else {
++            opTimePerIn.add( (nameWithCallSite, in.asInstanceOf[Long], time.asInstanceOf[Long]) )
++            opOutPerIn.add( (nameWithCallSite, in.asInstanceOf[Long], out.asInstanceOf[Long]) )
++          }
++        }
++<<<<<<< HEAD
++      //}
++    }
++    
++    /*
++    def multipleParents(x: SparkContext#LineageInfo): Boolean = {
++      x.parent.size match {
++        case 1 => false
++        case 0 =>
++          //println("No parents")
++          false
++        case _ => true
++      }
++    }*/
++
++    val visited = HashSet[Int]()
++
++=======
++        else {
++          // it's not error case, if there are cached RDDs, then profile should be failed.
++          logInfoSSP(s"rddProfile failed, name: $name, out: $out, in: $in, time: $time", isSSparkLogEnabled)
++        }
++     // }
++    }
++   
++    val visited = HashSet[Int]()
++
++    def accumulateRddSize(rddId: Int, size: Double): Unit = {
++      sc.rddSize(rddId) = math.max(sc.rddSize.getOrElse(rddId, Double.MinValue), size)
++      val count = sc.countMap.getOrElse(rddId, 0) + 1
++      sc.countMap(rddId) = count
++              
++      if (count >= 2) {
++        sc.reuseRddSize(rddId) = math.max(sc.reuseRddSize.getOrElse(rddId, Double.MinValue), size)
++      }
++      /*
++      if ( v > sc.rddSize.getOrElse(k, Double.MinValue)) {
++        sc.rddSize(k) = v
++        logInfoSSP(s"totalSize updated: ${sc.rddSize.values.sum} w/ $k $v", isSSparkLogEnabled)
++      }*/
++    }
++
++>>>>>>> LOSIC
++    def lineageIterator(x: (Int, SparkContext#LineageInfo)): Unit = {
++      val name = s"${x._2.name}(${x._2.callSite})"
++      val out = rddSize.get(x._1).getOrElse(None)
++      val time = rddTime.get(x._1).getOrElse(None)
++     
++      //if (!multipleParents(x._2)) {
++      if (x._2.deps.size == 1) {
++        val pId = x._2.deps.last
++        
++        // -1 is from stage, -2 is from job, 0 is from read file
++        if (pId == -1 || pId == -2 || //pId == 0){
++<<<<<<< HEAD
++              (pId == 0 && isHadoopRDD(x._2.name)) ) 
++=======
++              (pId == 0 && sc.isPairHadoopRDD(x._2.name)) ) 
++>>>>>>> LOSIC
++              { // in this case, input size should be shuffle or inputBytes
++          val in = if (accumInputBytes != 0L) accumInputBytes
++          else if (accumShuffleBytes != 0L) accumShuffleBytes
++          else {
++            logErrorSSP(s"both of InputBytes and ShuffleBytes are zero, rdd id ${x._1} on stage ${stage.id}")
++            None
++          }
++<<<<<<< HEAD
++          logInfoSSP(s"visited ${x._1} name:$name input:$in output:$out time:$time", isSSparkLogEnabled)
++          visited.add(x._1)
++          rddProfileToOpProfile(name, in, out, time)
++=======
++          /*
++          if (sc.isUncachableHadoopRDD(x._2.name)) {
++            logInfoSSP(s"visited uncachableRDD ${x._1} name:$name input:$in output:$out -> $in time:$time", isSSparkLogEnabled)  
++            visited.add(x._1)
++            rddProfileToOpProfile(name, in, in, time)
++          }
++          else {*/
++            logInfoSSP(s"visited ${x._1} name:$name input:$in output:$out time:$time", isSSparkLogEnabled)
++            visited.add(x._1)
++            if (sc.isSSparkPrepareEnabled && out != None) {
++              accumulateRddSize(x._1, out.asInstanceOf[Long].toFloat / Math.pow(2,20))
++            }
++            if (out != None && in != None && time != None) {
++              sc.profiledCount += 1
++              logInfoSSP(s"profiledCount++ ${sc.profiledCount}", isSSparkLogEnabled)
++            }
++            rddProfileToOpProfile(name, in, out, time)
++          //}
++>>>>>>> LOSIC
++        }
++        
++        else {
++          val in = rddSize.get(pId).getOrElse(None)
++          logInfoSSP(s"visited ${x._1} name:$name input:$in output:$out time:$time", isSSparkLogEnabled)
++          visited.add(x._1)
++<<<<<<< HEAD
++=======
++          if (sc.isSSparkPrepareEnabled && out != None) {
++            accumulateRddSize(x._1, out.asInstanceOf[Long].toFloat / Math.pow(2,20))
++          }
++          if (out != None && in != None && time != None) {
++            sc.profiledCount += 1
++            logInfoSSP(s"profiledCount++ ${sc.profiledCount}", isSSparkLogEnabled)
++          }
++>>>>>>> LOSIC
++          rddProfileToOpProfile(name, in, out, time)
++          val parent = lineage.find(k => k._1 == pId)
++          if (parent != None) {
++            if(!visited.contains(pId))
++              lineageIterator(parent.get)
++          }
++          else 
++            logInfoSSP(s"got parent None id $pId", isSSparkLogEnabled)
++        }
++      }
++
++      else if (x._2.deps.size == 0) {  // ParallelCollectionRDD case
++          val in = 0L
++          logInfoSSP(s"visited ${x._1} name:$name input:$in output:$out time:$time", isSSparkLogEnabled)
++          visited.add(x._1)
++<<<<<<< HEAD
++=======
++          if (sc.isSSparkPrepareEnabled && out != None) {
++            accumulateRddSize(x._1, out.asInstanceOf[Long].toFloat / Math.pow(2,20))
++          }
++          if (out != None && in != None && time != None) {
++            sc.profiledCount += 1
++            logInfoSSP(s"profiledCount++ ${sc.profiledCount}", isSSparkLogEnabled)
++          }
++>>>>>>> LOSIC
++          rddProfileToOpProfile(name, in, out, time)
++      }
++
++      else {  // multipleParents
++        val pIds = x._2.deps
++        var in = {    // sum of parents RDD size, make sure to make it sense
++          var sum = 0L
++          pIds.map{x => 
++            val size = rddSize.get(x).getOrElse(0L)
++            sum += size
++          }
++          sum
++        } // if there is shuffle dependency to previous stage, then one of size will be 0
++        
++        if (pIds.contains(-1)) {  // therefore, just add shuffle read bytes into in
++          in += accumShuffleBytes
++        }
++
++        var tmpStr = "parents size: "
++        pIds.map{x => 
++          val size = rddSize.get(x).getOrElse(0L)
++          tmpStr += s"[$x] $size "
++        }
++
++        logInfoSSP(s"$tmpStr, shuffleBytes: $accumShuffleBytes, in: $in", isSSparkLogEnabled)
++
++        logInfoSSP(s"visited ${x._1} name:$name input:$in output:$out time:$time", isSSparkLogEnabled)
++        visited.add(x._1)
++<<<<<<< HEAD
++=======
++        if (sc.isSSparkPrepareEnabled && out != None) {
++          accumulateRddSize(x._1, out.asInstanceOf[Long].toFloat / Math.pow(2,20))
++        }
++        if (out != None && in != None && time != None) {
++          sc.profiledCount += 1
++          logInfoSSP(s"profiledCount++ ${sc.profiledCount}", isSSparkLogEnabled)
++        }
++>>>>>>> LOSIC
++        rddProfileToOpProfile(name, in, out, time)
++        pIds.map(xi => lineage.find(k => k._1 == xi)) 
++            .map { parent => 
++              if (parent != None) {
++                if (!visited.contains(parent.get._1))
++                  lineageIterator(parent.get)
++              }
++              else
++                logInfoSSP(s"got parent None", isSSparkLogEnabled)
++            }
++              
++      }
++    }
++
++<<<<<<< HEAD
++    /*
++    lineage.foreach{ x =>
++      val name = x._2.name
++      var out: Long = -1L
++      var in: Long = -1L
++      var time: Long = -1L
++      val multipleParents: Boolean = x._2.parent.size match {
++        case 1 => false
++        case 0 => 
++          logErrorSSP("No parents")
++          false
++        case _ => true
++      }
++
++      if (rddSize.contains(x._1) && rddTime.contains(x._1)) {
++        out = rddSize.get(x._1).get
++        time = rddTime.get(x._1).get
++        in = if (multipleParents) {
++          var sum = 0L
++          val pIds = x._2.parent
++          pIds.map(x => sum += x)
++          sum
++        }
++        else {
++          val pId = x._2.parent.last
++          rddTime.get(pId).get
++        }
++      }
++
++      logInfoSSP(s"name $name, in $in, out $out, time $time")     
++      
++    }*/
++
++=======
++>>>>>>> LOSIC
++    lineageIterator(lineage.head)
++    logInfoSSP(s"stage ${stage.id} Input: ${accumInputBytes} Shuffle-Read: ${accumShuffleBytes}", isSSparkLogEnabled)
++    logInfoSSP(s"OP output/input stage ${stage.id} = ${opOutPerIn}", isSSparkLogEnabled)
++    logInfoSSP(s"OP time/input stage ${stage.id} = ${opTimePerIn}", isSSparkLogEnabled)
++    
++    def getFileWriter(opNameWithCallSite: String, timeOrSize: String): FileWriter = {
++      val filePath = Paths.get(sc.profilingDir
++        + "/" +opNameWithCallSite.split('(')(0)
++        + s"_$timeOrSize.csv")
++      if (Files.exists(filePath))
++        new FileWriter(filePath.toString, true)
++      else
++        new FileWriter(new File(filePath.toString))
++    }
++
++    opOutPerIn.foreach{x =>
++      val fw = getFileWriter(x._1, "size")
++      val inMB = x._2.toFloat / Math.pow(2,20)
++      val outMB = x._3.toFloat / Math.pow(2,20)
++      fw.write(s"${x._1}, ${inMB}, ${outMB}\n") 
++      fw.close()
++    }
++    //sc.opOutPerInAccum = opOutPerIn
++    opTimePerIn.foreach{x =>
++      val fw = getFileWriter(x._1, "time")
++      val inMB = x._2.toFloat / Math.pow(2,20)
++      val timeS = x._3.toFloat / 1e9
++      fw.write(s"${x._1}, ${inMB}, ${timeS}\n") 
++      fw.close()
++    }
++    //sc.opTimePerInAccum = opTimePerIn
++    //doesn't need to 
++  }
+ 
+   /**
+    * Marks a stage as finished and removes it from the list of running stages.
+@@ -1873,9 +2594,52 @@ private[spark] class DAGScheduler(
+       case Some(t) => "%.03f".format((clock.getTimeMillis() - t) / 1000.0)
+       case _ => "Unknown"
+     }
++
++<<<<<<< HEAD
++=======
++    val isSSparkOptimizeEnabled = sc.getMutableConf("optimize")
++    val unpersistPlan = sc.getMutableConf("unpersist")
++
++>>>>>>> LOSIC
++    if (selectCandidatesThread.isDefined) {
++      val startJoin = System.currentTimeMillis()
++      selectCandidatesThread.foreach(_.join())
++      val endJoin = System.currentTimeMillis()
++      val tTime = endJoin - startJoin
++      logInfoSSP(s"[Overlap mode] selectCandidates thread overhead: ${tTime} ms", isSSparkLogEnabled)
++    
++      if (tTime > 0) {  //if (!isSSparkLogEnabled && tTime > 0){
++        /* ALS application has huge amount of logs, so it adopts WARN log level
++           for checking overhead of selectCandidates in all cases, change it into WARN level
++        */
++        logWarningSSP(s"selectCandidates thread time may have overhead: ${tTime} ms")
++      }
++    }
++<<<<<<< HEAD
++=======
++    //if (sc.lastUnpersistFlag && sc.lastOptimizeFlag)
++    if (unpersistPlan && isSSparkOptimizeEnabled) {
++      logInfoSSP(s"Optimize unpersist plan for ${stage.id}",isSSparkLogEnabled)
++      sc.checkOptimizeUnpersist(stage.rdd)
++    }
++>>>>>>> LOSIC
++
+     if (errorMessage.isEmpty) {
+       logInfo("%s (%s) finished in %s s".format(stage, stage.name, serviceTime))
+       stage.latestInfo.completionTime = Some(clock.getTimeMillis())
++      
++      if (isSSparkProfileEnabled){
++        val lineage = sc.getLineage(stage.id)
++        if (lineage.size != 0)
++          handleProfiled(stage)
++        else
++          logInfoSSP("is this real submitted stage?", isSSparkLogEnabled)
++<<<<<<< HEAD
++=======
++
++        handleComputedRdds(stage, lineage)
++>>>>>>> LOSIC
++      }
+ 
+       // Clear failure count for this stage, now that it's succeeded.
+       // We only limit consecutive failures of stage attempts,so that if a stage is
