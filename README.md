@@ -36,7 +36,7 @@ Example environment used in our experiments:
 - Apache Spark 2.4.7
 - Hadoop 2.7.x
 
-
+<br>
 
 # Setup
 
@@ -48,21 +48,21 @@ tar -xzf spark-2.4.7.tgz
 cd spark-2.4.7
 ```
 
-
+<br>
 
 ## 2. Apply the LOSIC patch
 ```bash
 patch -p1 < /path/to/LOSIC/patch/losic-spark-2.4.7.patch
 ```
 
-
+<br>
 
 ## 3. Build Spark
 ```bash
 build/mvn -Pyarn -Phadoop-2.7 -DskipTests clean package
 ```
 
-
+<br>
 
 ## 4. Configure LOSIC
 
@@ -74,7 +74,7 @@ cp /path/to/LOSIC/conf/spark-defaults.conf conf/
 Alternatively, append the LOSIC-related parameters to your existing
 `spark-defaults.conf`.
 
-
+<br>
 
 # Running LOSIC
 
