@@ -15,14 +15,12 @@ LOSIC/
 │ └── losic-spark-2.4.7.patch
 ├── conf/
 │ └── spark-defaults.conf
-├── scripts/
-│ └── (example scripts)
 └── README.md
 ```
 
 - `patch/` : LOSIC modifications to the Spark engine  
 - `conf/` : Spark configuration enabling LOSIC  
-- `scripts/` : example scripts for running experiments  
+
 
 <br>
 
